@@ -1,3 +1,11 @@
+test.zip
+train_1.zip
+train_2.zip
+train_3.zip
+train_4.zip
+train_5.zip
+train_sample.zip
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[cod]
