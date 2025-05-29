@@ -123,6 +123,7 @@ class HelixEKFBrancher:
             new_br.sort(key=lambda b: b['score'])
             branches = new_br[:self.num_branches]
 
+        # smoothing
         for br in branches:
             tr = np.array(br['traj'])
             if tr.shape[0] >= 7:
@@ -168,17 +169,29 @@ def branch_mse(branch, true_xyz):
     d2,_ = tree.query(traj, k=1)
     return np.mean(d2)
 
+# compute hit stats: % of true hits captured and count of false hits
+
+def branch_hit_stats(branch, true_xyz, threshold=1.0):
+    # skip initial seed points
+    traj = np.array(branch['traj'][3:])
+    true_pts = np.array(true_xyz)
+    dists = np.linalg.norm(traj - true_pts, axis=1)
+    true_hits = np.sum(dists < threshold)
+    total = len(true_pts)
+    false_hits = total - true_hits
+    return true_hits/total*100, false_hits
+
 # === Main ===
 if __name__ == '__main__':
     _, hits, _, truth, particles = next(load_dataset(
         'train_1.zip', nevents=1, parts=['hits','cells','truth','particles']))
     hits['r'] = np.hypot(hits.x, hits.y)
-    truth['particle_id']=truth.particle_id.astype(int)
-    particles['particle_id']=particles.particle_id.astype(int)
-    particles['pt']=np.hypot(particles.px, particles.py)
+    truth['particle_id'] = truth.particle_id.astype(int)
+    particles['particle_id'] = particles.particle_id.astype(int)
+    particles['pt'] = np.hypot(particles.px, particles.py)
 
-    highE      = particles[particles.pt>=2.0]
-    truth_hits = truth.merge(hits,on='hit_id')\
+    highE      = particles[particles.pt >= 2.0]
+    truth_hits = truth.merge(hits, on='hit_id')\
                       .query('particle_id in @highE.particle_id')
     truth_hits['r'] = np.hypot(truth_hits.x, truth_hits.y)
 
@@ -191,32 +204,50 @@ if __name__ == '__main__':
 
         ekf = HelixEKFBrancher(
             trees, true_layers, true_xyzs,
-            noise_std=1.0, B_z=2,
+            noise_std=1.0, B_z=2.0,
             num_branches=30, survive_top=12,
             max_cands=10, step_candidates=5)
-        t        = np.linspace(0,1,len(true_layers)+3)
+        t = np.linspace(0, 1, len(true_layers) + 3)
         branches, G = ekf.run(seed_xyz, t, plot_tree=True)
 
+        # Evaluate MSE and select best branch
         mses = [branch_mse(br, true_xyz) for br in branches]
-        best_mse = min(mses)
-        print(f'PID={pid}: best MSE = {best_mse:.2f}')
+        best_idx = int(np.argmin(mses))
+        best_branch = branches[best_idx]
+        best_mse = mses[best_idx]
 
+        # Compute true-hit capture and false-hit count for best branch
+        # Build KDTree on true hits
+        true_tree = cKDTree(true_xyz)
+        traj = np.array(best_branch['traj'])
+        # consider trajectory points beyond the seed (first 3)
+        points = traj[3:]
+        dists, idx = true_tree.query(points, k=1)
+        # threshold for considering a hit as 'captured'
+        thresh = 3 * 1.0  # 3 * noise_std
+        true_captured = np.sum(dists <= thresh)
+        total_true = len(true_xyzs)
+        percent_captured = true_captured / total_true * 100
+        false_hits = len(points) - true_captured
 
-        # plot trajectories
-        fig = plt.figure(figsize=(6,4))
+        print(f'PID={pid}: best MSE = {best_mse:.2f}, '
+              f'{percent_captured:.1f}% true-hits, {false_hits} false-hits')
+
+        # plot trajectories with best branch highlighted
+        fig = plt.figure(figsize=(6, 4))
         ax = fig.add_subplot(111, projection='3d')
         ax.scatter(hits.x, hits.y, hits.z, c='gray', alpha=0.1, s=2)
         for bi, br in enumerate(branches):
-            tr  = np.array(br['traj'])
-            mse = branch_mse(br, true_xyz)
-            ax.plot(tr[:,0], tr[:,1], tr[:,2], alpha=0.6,
-                    label=f'b{bi} mse={mse:.0f}')
+            tr = np.array(br['traj'])
+            if bi == best_idx:
+                ax.plot(tr[:,0], tr[:,1], tr[:,2], linewidth=2,
+                        label=f'Best b{bi} mse={mses[bi]:.1f}')
+            else:
+                ax.plot(tr[:,0], tr[:,1], tr[:,2], alpha=0.3)
         ax.plot(true_xyz[:,0], true_xyz[:,1], true_xyz[:,2],
                 '--k', linewidth=2, label='truth')
         ax.scatter(seed_xyz[:,0], seed_xyz[:,1], seed_xyz[:,2],
                    c='red', marker='x', s=50)
-        ax.set_title(f'PID={pid} Trajectories')
+        ax.set_title(f'PID={pid} Trajectories (Best in bold)')
         ax.legend(loc='upper left', fontsize='small')
         plt.show()
-
-        
