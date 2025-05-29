@@ -10,7 +10,7 @@ import networkx as nx
 # === Helix‐EKF Brancher with stepwise branching & true‐hit injection + tree graph ===
 class HelixEKFBrancher:
     def __init__(self, trees, layers, true_xyzs,
-                 noise_std=2.0, B_z=2.0,
+                 noise_std=2.0, B_z=0.002,
                  num_branches=30, survive_top=12,
                  max_cands=10, step_candidates=5):
         self.trees = trees
@@ -204,7 +204,7 @@ if __name__ == '__main__':
 
         ekf = HelixEKFBrancher(
             trees, true_layers, true_xyzs,
-            noise_std=1.0, B_z=2.0,
+            noise_std=1.0, B_z=0.002,
             num_branches=30, survive_top=12,
             max_cands=10, step_candidates=5)
         t = np.linspace(0, 1, len(true_layers) + 3)
