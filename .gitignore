@@ -5,6 +5,7 @@ train_3.zip
 train_4.zip
 train_5.zip
 train_sample.zip
+test/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
