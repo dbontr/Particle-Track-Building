@@ -161,9 +161,9 @@ def weight_hits_phase2(truth, particles):
                             validate='many_to_one')
 
     # fix pt weight for hits w/o associated particle
-    combined['weight_pt'].fillna(0.0, inplace=True)
+    combined['weight_pt'] = combined['weight_pt'].fillna(0.0)
     # fix nhits for hits w/o associated particle
-    combined['particle_nhits'].fillna(0.0, inplace=True)
+    combined['particle_nhits'] = combined['particle_nhits'].fillna(0.0)
     combined['particle_nhits'] = combined['particle_nhits'].astype('i4')
 
     # compute hit count and order using absolute distance from particle vertex
