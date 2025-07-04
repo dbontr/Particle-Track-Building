@@ -6,7 +6,7 @@ from matplotlib import cm
 from matplotlib.colors import Normalize
 from typing import *
 
-def check_seed_and_plot(model: object, seed_pts: List[np.ndarray]) -> None:
+def check_seed_and_plot(model: object, seed_points: List[np.ndarray]) -> None:
     """
     Estimates a seed state from 3 seed points, compares it with geometric expectations,
     and visualizes the position and velocity vs. true circle tangent in 2D.
@@ -15,7 +15,7 @@ def check_seed_and_plot(model: object, seed_pts: List[np.ndarray]) -> None:
     ----------
     model : object
         An object with an `estimate_seed` method that takes a list of 3D points and returns a tuple of initial state and covariance.
-    seed_pts : List[np.ndarray]
+    seed_points : List[np.ndarray]
         A list of 3 seed points (each a 3-element array-like object representing x, y, z).
 
     Returns
@@ -23,14 +23,14 @@ def check_seed_and_plot(model: object, seed_pts: List[np.ndarray]) -> None:
     None
     """
     # generate seed
-    x0, P0 = model.estimate_seed(seed_pts)[0]
+    x0, P0 = model.estimate_seed(seed_points)[0]
 
     # 1. Position check
     print("Seed position:", np.round(x0[:3],5))
-    print("Last pt      :", np.round(seed_pts[-1],5))
+    print("Last pt      :", np.round(seed_points[-1],5))
 
     # 2. Tangent check
-    p1,p2,p3 = seed_pts
+    p1,p2,p3 = seed_points
     # compute true tangent
     A = np.array([[p2[0]-p1[0], p2[1]-p1[1]],
                   [p3[0]-p1[0], p3[1]-p1[1]]])
@@ -49,7 +49,7 @@ def check_seed_and_plot(model: object, seed_pts: List[np.ndarray]) -> None:
 
     # 3. Plot
     plt.figure(figsize=(4,4))
-    plt.scatter(*zip(*[p[:2] for p in seed_pts]), label="seed pts")
+    plt.scatter(*zip(*[p[:2] for p in seed_points]), label="seed points")
     plt.scatter(cx, cy, marker='x', color='k', label="circle center")
     plt.arrow(p3[0], p3[1],
               true_tan[0]*0.1, true_tan[1]*0.1,

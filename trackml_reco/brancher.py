@@ -1,207 +1,9 @@
 import numpy as np
-import pandas as pd
+from typing import Tuple, Dict, List
 import matplotlib.pyplot as plt
-from trackml.dataset import load_dataset
-from trackml.score import score_event
-from trackml.utils import add_position_quantities, add_momentum_quantities
-from trackml.weights import weight_hits_phase1
-from test.main import HelixEKFBrancher
-from scipy.spatial import cKDTree
-from typing import *
-from plot import *
 import networkx as nx
+from scipy.spatial import cKDTree
 
-PLOT = True
-DEBUG_N = None # Set to None to run through all seeds, set to a # to run through that amount of seeds
-
-def _make_submission(hit_ids: np.ndarray, track_ids: np.ndarray, renumber: bool = True) -> pd.DataFrame:
-    """
-    Creates a submission DataFrame mapping hit IDs to track IDs.
-
-    Parameters
-    ----------
-    hit_ids : np.ndarray
-        Array of hit IDs.
-    track_ids : np.ndarray
-        Array of track IDs.
-    renumber : bool, optional
-        If True, randomly renumbers track IDs to anonymize them. Default is True.
-
-    Returns
-    -------
-    pd.DataFrame
-        Submission DataFrame with 'hit_id' and 'track_id' columns.
-    """
-    if renumber:
-        unique_ids, inverse = np.unique(track_ids, return_inverse=True)
-        numbers = np.arange(1, len(unique_ids) + 1, dtype=unique_ids.dtype)
-        np.random.shuffle(numbers)
-        track_ids = numbers[inverse]
-    return pd.DataFrame({'hit_id': hit_ids, 'track_id': track_ids})
-
-def random_solution(hits: pd.DataFrame, ntracks: int) -> pd.DataFrame:
-    """
-    Assigns random track IDs to hits to create a baseline solution.
-
-    Parameters
-    ----------
-    hits : pd.DataFrame
-        DataFrame of hit information containing 'hit_id'.
-    ntracks : int
-        Number of unique track IDs to assign.
-
-    Returns
-    -------
-    pd.DataFrame
-        Submission DataFrame with randomly assigned 'track_id'.
-    """
-    ids = np.random.randint(1, ntracks + 1, size=len(hits), dtype='i4')
-    return _make_submission(hits['hit_id'].values, ids, renumber=False)
-
-def drop_hits(truth: pd.DataFrame, probability: float) -> pd.DataFrame:
-    """
-    Randomly drops a fraction of hits by assigning fake track IDs.
-
-    Parameters
-    ----------
-    truth : pd.DataFrame
-        Ground truth DataFrame with 'hit_id' and 'particle_id'.
-    probability : float
-        Probability that a hit is dropped (reassigned to a fake ID).
-
-    Returns
-    -------
-    pd.DataFrame
-        Submission DataFrame with dropped hits replaced by fake track IDs.
-    """
-    out = np.array(truth['particle_id'], copy=True)
-    dropped_mask = (np.random.random_sample(len(out)) < probability)
-    dropped_count = np.count_nonzero(dropped_mask)
-    fakeid0 = np.max(out) + 1
-    fakeids = np.arange(fakeid0, fakeid0 + dropped_count, dtype='i8')
-    np.place(out, dropped_mask, fakeids)
-    return _make_submission(truth['hit_id'].values, out)
-
-def shuffle_hits(truth: pd.DataFrame, probability: float) -> pd.DataFrame:
-    """
-    Randomly reassigns some hits to incorrect track IDs.
-
-    Parameters
-    ----------
-    truth : pd.DataFrame
-        Ground truth DataFrame with 'hit_id' and 'particle_id'.
-    probability : float
-        Probability of a hit being reassigned to a different random particle.
-
-    Returns
-    -------
-    pd.DataFrame
-        Submission DataFrame with shuffled track assignments.
-    """
-    out = np.array(truth['particle_id'], copy=True)
-    shuffled_mask = (np.random.random_sample(len(out)) < probability)
-    shuffled_count = np.count_nonzero(shuffled_mask)
-    wrongparticles = np.random.choice(np.unique(out), size=shuffled_count)
-    np.place(out, shuffled_mask, wrongparticles)
-    return _make_submission(truth['hit_id'].values, out)
-
-def jitter_seed_points(pts: np.ndarray, sigma: float = 0.001) -> np.ndarray:
-    """
-    Adds Gaussian noise to seed points to simulate measurement uncertainty.
-
-    Parameters
-    ----------
-    pts : np.ndarray
-        Array of 3D seed point coordinates.
-    sigma : float, optional
-        Standard deviation of Gaussian noise. Default is 0.001.
-
-    Returns
-    -------
-    np.ndarray
-        Jittered seed points.
-    """
-    noise = np.random.normal(loc=0.0, scale=sigma, size=pts.shape)
-    return pts + noise
-
-# --- Data Loading & Filtering ---
-def load_and_preprocess(event_zip: str, pt_threshold: float = 2.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
-    """
-    Loads an event and filters hits by transverse momentum threshold.
-
-    Parameters
-    ----------
-    event_zip : str
-        Path to event ZIP file.
-    pt_threshold : float, optional
-        Minimum transverse momentum (pT) to retain particles. Default is 2.0.
-
-    Returns
-    -------
-    Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]
-        Tuple of (hits, truth_hits, particles) DataFrames.
-    """
-    _, hits, _, truth, particles = next(
-        load_dataset(event_zip, nevents=1,
-                     parts=['hits','cells','truth','particles']))
-    # convert to meters
-    hits[['x', 'y', 'z']] /= 1000.0
-    # derived position and momentum
-    hits = add_position_quantities(hits)
-    particles = add_momentum_quantities(particles)
-
-    # filter high-pt particles
-    valid_ids = set(particles[particles.pt >= pt_threshold].particle_id.astype(int))
-    truth_hits = truth.merge(hits, on='hit_id', how='inner')
-    truth_hits = truth_hits[truth_hits.particle_id.isin(valid_ids)]
-
-    # compute per-hit weights
-    wdf = weight_hits_phase1(truth, particles)
-
-    # choose a weight column (or default to 1.0)
-    if 'weight' in wdf.columns:
-        chosen = wdf.set_index('hit_id')['weight']
-    elif 'weight_pt' in wdf.columns:
-        chosen = wdf.set_index('hit_id')['weight_pt']
-    else:
-        # fallback: everyone weight=1.0
-        chosen = pd.Series(1.0, index=wdf.hit_id)
-
-    # map weights into truth_hits, filling any missing with 1.0
-    truth_hits['weight'] = truth_hits['hit_id'].map(chosen).fillna(1.0)
-
-    print(f"Loaded {len(hits)} hits, {len(truth_hits)} truth-hits (pt>={pt_threshold})")
-    return hits, truth_hits, particles
-
-
-# --- Build KD-Trees for Detector Layers ---
-def build_layer_trees(hits: pd.DataFrame) -> Tuple[Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]], List[Tuple[int, int]]]:
-    """
-    Builds KD-trees for each detector layer to enable fast hit lookup.
-
-    Parameters
-    ----------
-    hits : pd.DataFrame
-        DataFrame containing hit positions and detector layer IDs.
-
-    Returns
-    -------
-    Tuple[dict, list]
-        Dictionary mapping layer keys to KD-tree tuples (tree, points, hit_ids),
-        and sorted list of layer keys.
-    """
-    hits['layer_key'] = list(zip(hits.volume_id, hits.layer_id))
-    trees, layers = {}, []
-    for key, grp in hits.groupby('layer_key'):
-        pts = grp[['x', 'y', 'z']].values
-        ids = grp['hit_id'].values
-        trees[key] = (cKDTree(pts), pts, ids)
-        layers.append(key)
-        print(f"Layer {key}: {len(pts)} hits")
-    layers = sorted(layers, key=lambda x: (x[0], x[1]))
-    return trees, layers
-
-# --- Combinatorial Helix EKF with Charge Hypotheses ---
 class HelixEKFBrancher:
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple['cKDTree', np.ndarray, np.ndarray]],
@@ -262,13 +64,13 @@ class HelixEKFBrancher:
         # dict mapping layer key -> a point on that plane
         self.layer_points  = {lay: np.array([0,0,0]) for lay in layers}
 
-    def H_jac(self, x: np.ndarray) -> np.ndarray:
+    def H_jac(self, _: np.ndarray) -> np.ndarray:
         """
         Computes the Jacobian of the measurement model with respect to the state.
 
         Parameters
         ----------
-        x : ndarray
+        _ : ndarray
             Current state vector (7D).
 
         Returns
@@ -379,23 +181,23 @@ class HelixEKFBrancher:
         tuple of (ndarray, ndarray)
             Candidate hit positions and their corresponding hit IDs.
         """
-        # trees[layer] is (cKDTree, pts, ids)
-        tree, pts, ids = self.trees[layer]
+        # trees[layer] is (cKDTree, points, ids)
+        tree, points, ids = self.trees[layer]
 
         # find k nearest on that layer
         dists, idxs = tree.query(pred_xyz, k=self.max_cands)
         idxs = np.atleast_1d(idxs)  # make array even if k=1
 
         # compute actual distances
-        pts_sel = pts[idxs]
-        d2 = np.linalg.norm(pts_sel - pred_xyz, axis=1)
+        points_sel = points[idxs]
+        d2 = np.linalg.norm(points_sel - pred_xyz, axis=1)
 
         # pick the best step_candidates indices
         best_local = np.argsort(d2)[:self.step_candidates]
         best_idxs = idxs[best_local]
 
         # return the points *and* their hit_ids
-        return pts[best_idxs], ids[best_idxs]
+        return points[best_idxs], ids[best_idxs]
 
     def to_local_frame_jac(self, plane_normal: np.ndarray) -> np.ndarray:
         """
@@ -516,9 +318,9 @@ class HelixEKFBrancher:
                 x_pred = self.propagate(br['state'], dt)
                 P_pred = F @ br['cov'] @ F.T + self.Q0 * dt
 
-                pts_cand, id_cand = self._get_candidates(x_pred[:3], layer)
+                points_cand, id_cand = self._get_candidates(x_pred[:3], layer)
 
-                for z, hid in zip(pts_cand, id_cand):
+                for z, hid in zip(points_cand, id_cand):
                     # 1) project into local (u,v), compute chi2
                     meas_pred, Puv = self.to_local_frame(x_pred[:3], P_pred, plane_n, plane_p)
                     meas_z,   Ruv = self.to_local_frame(z, np.zeros((3,3)), plane_n, plane_p)
@@ -564,12 +366,6 @@ class HelixEKFBrancher:
                         'hit_ids' : br.get('hit_ids', []) + [int(hid)]
                     })
 
-                    meas_pred, Puv = self.to_local_frame(x_pred[:3], P_pred, plane_n, plane_p)
-                    meas_z,   Ruv = self.to_local_frame(z, np.zeros((3,3)), plane_n, plane_p)
-                    Suv = Puv + Ruv
-                    res_uv = meas_z - meas_pred
-                    chi2 = res_uv @ np.linalg.solve(Suv, res_uv)
-
                     if chi2 < gate:
                         Huv = self.to_local_frame_jac(plane_n)
                         K_uv = P_pred[:3,:3] @ Huv.T @ np.linalg.inv(Suv)
@@ -614,193 +410,3 @@ class HelixEKFBrancher:
         pos={n:tuple(G.nodes[n]['pos'][:2]) for n in G.nodes()}
         plt.figure(figsize=(8,8)); nx.draw(G,pos,with_labels=True,node_size=50,arrowsize=10)
         plt.title('Branching tree (XY projection)'); plt.show()
-
-# --- Metrics & Plotting ---
-def compute_metrics(xs: np.ndarray, true_pts: np.ndarray, tol: float = 0.005) -> Tuple[float, float]:
-    """
-    Computes MSE and percentage of hits within a given distance tolerance.
-
-    Parameters
-    ----------
-    xs : ndarray
-        Predicted trajectory points (Nx3 or more).
-    true_pts : ndarray
-        Ground truth hit coordinates.
-    tol : float, optional
-        Distance threshold for considering a hit correct. Default is 0.005.
-
-    Returns
-    -------
-    tuple
-        Mean squared error and percentage of matched hits.
-    """
-    tree = cKDTree(true_pts)
-    d, _ = tree.query(xs[:,:3])
-    mse = np.mean(d**2)
-    pct = 100 * np.sum(d <= tol) / len(xs)
-    return mse, pct
-
-
-
-def branch_mse(branch: Dict, true_xyz: np.ndarray) -> float:
-    """
-    Computes mean squared error between a branch and true hit positions.
-
-    Parameters
-    ----------
-    branch : dict
-        A branch dictionary containing 'traj' key.
-    true_xyz : ndarray
-        Ground truth hit coordinates.
-
-    Returns
-    -------
-    float
-        Mean squared distance between branch trajectory and true hits.
-    """
-    tree=cKDTree(true_xyz)
-    traj=np.array(branch['traj'])
-    d2,_=tree.query(traj,k=1)
-    return np.mean(d2)
-
-def branch_hit_stats(branch: Dict, true_xyz: np.ndarray, threshold: float = 1.0) -> Tuple[float, int]:
-    """
-    Computes hit recall statistics for a single branch.
-
-    Parameters
-    ----------
-    branch : dict
-        A branch dictionary containing 'traj' key.
-    true_xyz : ndarray
-        Ground truth hit coordinates.
-    threshold : float, optional
-        Maximum distance for a hit to be considered matched. Default is 1.0.
-
-    Returns
-    -------
-    tuple
-        Percentage of true hits matched and number of missed hits.
-    """
-    traj=np.array(branch['traj'][3:])
-    true_pts=np.array(true_xyz)
-    dists=np.linalg.norm(traj-true_pts,axis=1)
-    true_hits=np.sum(dists<threshold)
-    return true_hits/len(true_pts)*100,len(true_pts)-true_hits
-
-# --- Main Execution ---
-if __name__=='__main__':
-    # 1. Load & preprocess (unchanged)…
-    hits, truth_hits, particles = load_and_preprocess('train_1.zip')
-
-    # Build layer list for coloring
-    layer_tuples = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x:(x[0],x[1]))
-    
-    # 2. Plot the detector & truth before running EKF
-    if PLOT:
-        plot_hits_colored_by_layer(hits, layer_tuples)
-        plot_layer_boundaries(hits, layer_tuples) 
-        plot_truth_paths_rz(truth_hits, max_tracks=None)
-        plot_truth_paths_3d(truth_hits, max_tracks=None)
-
-    # 2. Build KD-trees & layers (unchanged)…
-    trees, layers = build_layer_trees(hits)
-    
-    # 3. Build seeds _and_ capture the “future” true_xyzs for each seed
-    seeds = []
-    all_mses = []
-    all_pcts = []
-    for pid, grp in truth_hits.groupby('particle_id'):
-        grp = grp.sort_values('r')
-        if len(grp) < 4:  # need at least 3 for seed + 1 true layer
-            continue
-        seed_pts = grp[['x','y','z']].values[:3]
-        seed_pts = jitter_seed_points(seed_pts, sigma=0.001)
-        
-        # the “true” hits beyond the seed (for candidate injection)
-        rest = grp[['x','y','z']].values[3:]
-        # the layers corresponding to those rest hits
-        true_layers = list(zip(grp.volume_id.values[3:], grp.layer_id.values[3:]))
-        
-        seeds.append((pid, seed_pts, true_layers, rest))
-        if DEBUG_N is not None and len(seeds) >= DEBUG_N:
-            break
-    seed_rows = []
-    for pid, seed_pts, _, _ in seeds:
-        for pt in seed_pts:
-            seed_rows.append({
-                'particle_id': pid,
-                'x': pt[0], 'y': pt[1], 'z': pt[2]
-            })
-    seeds_df = pd.DataFrame(seed_rows)
-    # now call your two helpers
-    if PLOT:
-        plot_seed_paths_rz(seeds_df, max_seeds=DEBUG_N)
-        plot_seed_paths_3d(seeds_df, max_seeds=DEBUG_N)
-    
-    # 4. Loop over seeds—but now with HelixEKFBrancher
-    submission_list = []
-    for pid, seed_pts, true_layers, true_xyzs in seeds:
-        # instantiate your brancher
-        ekf = HelixEKFBrancher(
-            trees=trees,
-            layers=true_layers,
-            true_xyzs=true_xyzs,
-            noise_std=1.0,
-            B_z=0.002,
-            num_branches=30,
-            survive_top=12,
-            max_cands=10,
-            step_candidates=5
-        )
-        
-        # create a time array matching the number of layers (plus a bit)
-        t = np.linspace(0, 1, len(true_layers) + 3)
-        
-        # run the branching EKF
-        branches, graph = ekf.run(seed_pts, t, plot_tree=PLOT)
-        
-        # pick the best branch by lowest MSE to true_xyzs
-        best = min(branches, key=lambda br: branch_mse(br, true_xyzs))
-        best_traj = np.array(best['traj'])
-
-        # you can compute metrics, plot, etc. just like before…
-        mse = branch_mse(best, true_xyzs)
-        pct_hits, _ = branch_hit_stats(best, true_xyzs)
-        all_mses.append(mse)
-        all_pcts.append(pct_hits)
-        print(f"PID={pid}: MSE={mse:.3f}, %hits={pct_hits:.1f}")
-
-        if PLOT:
-            fig = plt.figure(figsize=(6,6))
-            ax  = fig.add_subplot(111, projection='3d')
-            ax.scatter(hits.x, hits.y, hits.z, c='gray', s=1, alpha=0.1)
-            tp = truth_hits[truth_hits.particle_id==pid].sort_values('r')
-            ax.plot(tp.x, tp.y, tp.z, '--k', label='truth')
-            ax.plot(best_traj[:,0], best_traj[:,1], best_traj[:,2], '-b', label='best estimate')
-            ax.set_title(f'PID {pid} (best branch)')
-            ax.legend()
-            plt.show()
-        
-        # collect hit IDs—brancher doesn’t track IDs by default, so if you need those:
-        #   you could augment HelixEKFBrancher to also carry `hit_id` alongside xyz
-        #   or simply project your best_traj points back onto the KD-tree:
-        tree = trees[true_layers[-1]][0]  # example for last layer
-        _, idxs = tree.query(best_traj, k=1)
-        # map idxs back to hit_ids if you stored them in your tree
-        # here I’m assuming your `trees` dict was (tree, pts, ids) as in Script 1:
-        ids = trees[true_layers[-1]][2][idxs]
-        
-        for hid in ids:
-            submission_list.append({'hit_id': int(hid), 'track_id': pid})
-    
-    # 5. Final submission, scoring, etc. (unchanged)…
-    submission_df = pd.DataFrame(submission_list).drop_duplicates('hit_id')
-    score = score_event(
-        truth_hits[['hit_id','particle_id','weight']],
-        submission_df
-    )
-    # Print averages over all seeds processed
-    if all_mses:
-        print(f"\nAverage MSE over {len(all_mses)} seeds: {np.mean(all_mses):.3f}")
-        print(f"Average %hits over {len(all_pcts)} seeds: {np.mean(all_pcts):.1f}%")
-    print("Event score:", score)

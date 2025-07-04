@@ -1,3 +1,7 @@
+# trackml library from GitHub
+trackml @ git+https://github.com/LAL/trackml-library.git@master
+
+# Runtime dependencies
 numpy
 pandas
 matplotlib
