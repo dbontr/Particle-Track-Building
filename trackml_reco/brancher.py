@@ -7,8 +7,6 @@ from scipy.spatial import cKDTree
 class HelixEKFBrancher:
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple['cKDTree', np.ndarray, np.ndarray]],
-                 layers: List[Tuple[int, int]],
-                 true_xyzs: List[np.ndarray],
                  noise_std: float = 2.0,
                  B_z: float = 0.002,
                  num_branches: int = 30,
@@ -40,8 +38,6 @@ class HelixEKFBrancher:
             Number of hit candidates used to branch at each step. Default is 5.
         """
         self.trees = trees
-        self.layers = layers
-        self.true_xyzs = true_xyzs
         self.noise_std = noise_std
         self.B_z = B_z
         self.num_branches = num_branches
@@ -60,9 +56,9 @@ class HelixEKFBrancher:
 
         # --- user must fill these with per-layer geometry ---
         # e.g. dict mapping layer key -> normal vector
-        self.layer_normals = {lay: np.array([0,0,1]) for lay in layers}
+        self.layer_normals = np.array([0,0,1]) 
         # dict mapping layer key -> a point on that plane
-        self.layer_points  = {lay: np.array([0,0,0]) for lay in layers}
+        self.layer_points  = np.array([0,0,0])
 
     def H_jac(self, _: np.ndarray) -> np.ndarray:
         """
@@ -281,7 +277,7 @@ class HelixEKFBrancher:
         v0 = t * (n2/dt)
         return v0, kappa
 
-    def run(self, seed_xyz: np.ndarray, t: np.ndarray, plot_tree: bool = False) -> Tuple[List[Dict], nx.DiGraph]:
+    def run(self, seed_xyz: np.ndarray, layers: List, t: np.ndarray, plot_tree: bool = False) -> Tuple[List[Dict], nx.DiGraph]:
         """
         Runs the full Extended Kalman Filter with branching on seed input.
 
@@ -307,14 +303,15 @@ class HelixEKFBrancher:
         branches = [{'id':0,'parent':None,'traj':list(seed_xyz),'state':x0,'cov':P0,'score':0.0}]
         G = nx.DiGraph(); G.add_node(0, pos=seed_xyz[2]); next_id=1
 
-        for i, layer in enumerate(self.layers):
+        # uses truth level layers? 
+        for i, layer in enumerate(layers):
             gate = self.inner_gate if i<3 else self.outer_gate
-            true_hit = np.array(self.true_xyzs[i])
-            plane_n = self.layer_normals[layer]
-            plane_p = self.layer_points[layer]
+            #true_hit = np.array(self.true_xyzs[i])
+            plane_n = self.layer_normals
+            plane_p = self.layer_points
             new_br = []
             for br in branches:
-                F      = self.compute_F(br['state'], dt)
+                F = self.compute_F(br['state'], dt)
                 x_pred = self.propagate(br['state'], dt)
                 P_pred = F @ br['cov'] @ F.T + self.Q0 * dt
 
@@ -365,27 +362,6 @@ class HelixEKFBrancher:
                         'score'   : score,
                         'hit_ids' : br.get('hit_ids', []) + [int(hid)]
                     })
-
-                    if chi2 < gate:
-                        Huv = self.to_local_frame_jac(plane_n)
-                        K_uv = P_pred[:3,:3] @ Huv.T @ np.linalg.inv(Suv)
-                        K = np.zeros((7,2)); K[:3,:2] = K_uv
-                        x_upd = x_pred + K @ res_uv
-                        H_full = np.zeros((2, self.state_dim))
-                        H_full[:, :3] = Huv
-
-                        P_upd = (np.eye(self.state_dim) - K @ H_full) @ P_pred
-                        score = br['score'] + chi2
-                    else:
-                        x_upd = x_pred.copy(); x_upd[6] += np.random.randn()*1e-4
-                        P_upd = P_pred
-                        score = br['score'] + chi2 + 5.0
-                    traj = br['traj'] + [x_upd[:3]]
-                    node_id = next_id
-                    G.add_node(node_id, pos=x_upd[:3]); G.add_edge(br['id'], node_id)
-                    next_id += 1
-                    new_br.append({'id':node_id,'parent':br['id'],'traj':traj,
-                                   'state':x_upd,'cov':P_upd,'score':score})
             if not new_br: break
             new_br.sort(key=lambda b: b['score'])
             branches = new_br[:self.num_branches]
