@@ -2,7 +2,7 @@ __all__ = [
     "load_and_preprocess",
     "build_layer_trees",
     "random_solution", "drop_hits", "shuffle_hits", "jitter_seed_points",
-    "HelixEKFBrancher",
+    "Brancher", "HelixEKFBrancher", "HelixAStarBrancher", "HelixACOBrancher",
     "compute_metrics", "branch_mse", "branch_hit_stats",
     "plot_hits_colored_by_layer", "plot_layer_boundaries",
     "plot_truth_paths_rz", "plot_truth_paths_3d",
@@ -26,7 +26,10 @@ from .utils import (
 )
 
 # Tracker
-from .brancher import HelixEKFBrancher
+from .branchers.brancher import Brancher
+from .branchers.ekf import HelixEKFBrancher
+from .branchers.astar import HelixAStarBrancher
+from .branchers.aco import HelixACOBrancher
 
 # Metrics
 from .metrics import compute_metrics, branch_mse, branch_hit_stats

@@ -20,11 +20,13 @@ def compute_metrics(xs: np.ndarray, true_points: np.ndarray, tol: float = 0.005)
     tuple
         Mean squared error and percentage of matched hits.
     """
-    tree = cKDTree(true_points)
-    d, _ = tree.query(xs[:,:3])
-    mse = np.mean(d**2)
-    pct = 100 * np.sum(d <= tol) / len(xs)
-    return mse, pct
+    true_tree = cKDTree(true_points)
+    d_pred, _ = true_tree.query(xs[:, :3])
+    mse = np.mean(d_pred**2)
+    pred_tree = cKDTree(xs[:, :3])
+    d_true, _ = pred_tree.query(true_points)
+    pct_recovered = 100.0 * np.sum(d_true <= tol) / len(true_points)
+    return mse, pct_recovered
 
 def branch_mse(branch: Dict, true_xyz: np.ndarray) -> float:
     """

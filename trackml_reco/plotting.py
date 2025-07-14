@@ -315,3 +315,106 @@ def plot_layer_boundaries(hits_df: pd.DataFrame, layer_tuples: List[Tuple[int, i
     ax.grid(True)
     plt.tight_layout()
     plt.show()
+
+    
+def plot_branches(branches: List[Dict], seed_points: List[np.ndarray], future_layers: List[Tuple[int, int]], 
+                 truth_hits: Optional[pd.DataFrame] = None, particle_id: Optional[int] = None) -> None:
+    """
+    Plots the branches of a track building process with different colors for each branch.
+
+    Parameters
+    ----------
+    branches : List[Dict]
+        List of branch dictionaries, each containing 'traj', 'hit_ids', 'state', and 'cov' keys.
+    seed_points : List[np.ndarray]
+        List of 3D seed points.
+    future_layers : List[Tuple[int, int]]
+        List of future layer tuples.
+    truth_hits : Optional[pd.DataFrame], default=None
+        DataFrame containing truth hits with columns ['x', 'y', 'z', 'particle_id'].
+    particle_id : Optional[int], default=None
+        Particle ID to filter truth hits. If None and truth_hits provided, uses first particle.
+    """ 
+    fig, ax = plt.subplots(figsize=(12, 8))
+    
+    truth_particle = truth_hits[truth_hits['particle_id'] == particle_id]
+
+    truth_r = np.sqrt(truth_particle['x']**2 + truth_particle['y']**2)
+    #ax.plot(truth_particle['z'], truth_r, 'k--', linewidth=2, alpha=0.8, label=f'Truth (PID {particle_id})')
+    ax.scatter(truth_particle['z'], truth_r, c='black', s=30, alpha=0.6, marker='s', label='Truth hits')
+
+    # Plot branches with different colors
+    colors = plt.cm.Set3(np.linspace(0, 1, len(branches)))  # Use Set3 colormap for distinct colors
+    all_traj = []
+    for i, branch in enumerate(branches):
+        traj = np.array(branch.trajectory)
+        r = np.sqrt(traj[:, 0]**2 + traj[:, 1]**2)
+        ax.plot(traj[:, 2], r, 'o-', color=colors[i], alpha=0.8, linewidth=2, 
+                label=f'Branch {i+1} ({len(traj)} points)')
+        all_traj.append(traj)
+
+    seed_points_array = np.array(seed_points)
+    seed_r = np.sqrt(seed_points_array[:, 0]**2 + seed_points_array[:, 1]**2)
+    ax.scatter(seed_points_array[:, 2], seed_r, c='red', s=100, marker='*', 
+               label='Seed points', zorder=10, edgecolors='black', linewidth=1)
+    plt.title(f'Track Building Branches (R-Z View) for Particle {particle_id}')
+    ax.set_xlabel('z (m)')
+    ax.set_ylabel('r (m)')
+    ax.set_title('Track Building Branches (R-Z View)')
+    ax.grid(True, alpha=0.3)
+    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_track_building_debug(track_builder, seed_row: pd.Series, branches: List[Dict], 
+                            max_branches_to_plot: int = 10) -> None:
+    """
+    Helper function to plot track building debug information for a specific seed.
+    
+    Parameters
+    ----------
+    track_builder : TrackBuilder
+        The track builder instance containing hit_pool and other data.
+    seed_row : pd.Series
+        A seed row from the seeds DataFrame.
+    branches : List[Dict]
+        List of branch dictionaries from track building.
+    max_branches_to_plot : int, default=10
+        Maximum number of branches to plot to avoid clutter.
+    """
+    # Extract seed points from the seed row
+    particle_id = seed_row['particle_id']
+    
+    # Get the 3 seed points for this particle
+    particle_hits = track_builder.hit_pool.pt_cut_hits[
+        track_builder.hit_pool.pt_cut_hits['particle_id'] == particle_id
+    ].sort_values('r')
+    
+    if len(particle_hits) < 3:
+        print(f"Warning: Particle {particle_id} has fewer than 3 hits")
+        return
+    
+    # Take first 3 hits as seed points
+    seed_points = particle_hits.head(3)[['x', 'y', 'z']].values.tolist()
+    
+    # Limit branches for plotting
+    branches_to_plot = branches[:max_branches_to_plot]
+    
+    # Plot with truth hits
+    plot_branches(
+        branches=branches_to_plot,
+        seed_points=seed_points,
+        future_layers=seed_row['future_layers'],
+        truth_hits=track_builder.hit_pool.pt_cut_hits,
+        particle_id=particle_id
+    )
+    
+    # Print some debug info
+    print(f"Particle {particle_id}: {len(branches)} branches, plotting {len(branches_to_plot)}")
+    print(f"Seed points: {len(seed_points)}")
+    print(f"Future layers: {len(seed_row['future_layers'])}")
+    
+    if branches:
+        branch_lengths = [len(branch['traj']) for branch in branches]
+        print(f"Branch lengths: min={min(branch_lengths)}, max={max(branch_lengths)}, mean={np.mean(branch_lengths):.1f}")

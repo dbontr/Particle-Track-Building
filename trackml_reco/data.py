@@ -3,6 +3,7 @@ from trackml.utils import add_position_quantities, add_momentum_quantities
 from trackml.weights import weight_hits_phase1
 from typing import Tuple
 import pandas as pd
+import trackml_reco.hit_pool as trk_hit_pool
 
 def load_and_preprocess(event_zip: str, pt_threshold: float = 2.0) -> Tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     """
@@ -32,7 +33,7 @@ def load_and_preprocess(event_zip: str, pt_threshold: float = 2.0) -> Tuple[pd.D
     # filter high-pt particles
     valid_ids = set(particles[particles.pt >= pt_threshold].particle_id.astype(int))
     truth_hits = truth.merge(hits, on='hit_id', how='inner')
-    truth_hits = truth_hits[truth_hits.particle_id.isin(valid_ids)]
+    pt_cut_hits = truth_hits[truth_hits.particle_id.isin(valid_ids)]
 
     # compute per-hit weights
     wdf = weight_hits_phase1(truth, particles)
@@ -47,7 +48,8 @@ def load_and_preprocess(event_zip: str, pt_threshold: float = 2.0) -> Tuple[pd.D
         chosen = pd.Series(1.0, index=wdf.hit_id)
 
     # map weights into truth_hits, filling any missing with 1.0
-    truth_hits['weight'] = truth_hits['hit_id'].map(chosen).fillna(1.0)
+    pt_cut_hits['weight'] = pt_cut_hits['hit_id'].map(chosen).fillna(1.0)
 
-    print(f"Loaded {len(hits)} hits, {len(truth_hits)} truth-hits (pt>={pt_threshold})")
-    return hits, truth_hits, particles
+    print(f"Loaded {len(hits)} hits, {len(pt_cut_hits)} selected-hits (pt>={pt_threshold})")
+
+    return trk_hit_pool.HitPool(hits, pt_cut_hits)
