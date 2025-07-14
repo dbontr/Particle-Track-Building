@@ -9,7 +9,6 @@ from trackml_reco.branchers.brancher import Brancher
 class HelixAStarBrancher(Brancher):
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]],
-                 layers: List[Tuple[int, int]],
                  noise_std: float = 2.0,
                  B_z: float = 0.002,
                  max_cands: int = 10):
@@ -41,7 +40,6 @@ class HelixAStarBrancher(Brancher):
             z-coordinate of each layer plane, extracted from layer geometry.
         """
         self.trees = trees
-        self.layers = layers
         self.noise_std = noise_std
         self.B_z = B_z
         self.max_cands = max_cands

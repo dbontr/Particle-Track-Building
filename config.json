@@ -1,0 +1,28 @@
+{
+  "ekf_config": {
+    "noise_std": 1.0,
+    "B_z": 0.002,
+    "num_branches": 30,
+    "survive_top": 12,
+    "max_cands": 10,
+    "step_candidates": 5
+  },
+  
+  "astar_config": {
+    "noise_std": 1.0,
+    "B_z": 0.002,
+    "max_cands": 10
+  },
+
+  "aco_config": {
+    "layers": null,
+    "noise_std": 2.0,
+    "B_z": 0.002,
+    "num_ants": 50,
+    "num_iter": 10,
+    "alpha": 1.0,
+    "beta": 2.0,
+    "rho": 0.1,
+    "max_cands": 10
+  }
+}

@@ -1,4 +1,5 @@
 import argparse
+import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
@@ -24,10 +25,6 @@ def main():
                         help='minimum pT threshold in GeV (default: 2.0)')
     parser.add_argument('--debug-n','-d', type=int, default=None, 
                         help='if set, only process this many seeds')
-    parser.add_argument('--max-tracks-per-seed', type=int, default=30,
-                        help='maximum track candidates per seed (default: 30)')
-    parser.add_argument('--max-branches', type=int, default=12, 
-                        help='maximum branches to keep per layer (default: 12)')
     parser.add_argument('--plot', type=bool, default=True, 
                         help='plot graphs of tracks (default: True)')
     parser.add_argument('--extra-plots', type=bool, default=False, 
@@ -47,44 +44,43 @@ def main():
         "(default: 'ekf')"
     ))
     
-    
     args = parser.parse_args()
-    brancher = {'ekf': HelixEKFBrancher, 'astar': HelixAStarBrancher, 'aco': HelixACOBrancher}[args.brancher]
 
     # 1. Load & preprocess data
     print("Loading and preprocessing data...")
     hit_pool= trk_data.load_and_preprocess(args.file, pt_threshold=args.pt)
-
+    
+    hits, pt_cut_hits = hit_pool.hits, hit_pool.pt_cut_hits 
+    layer_tuples = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x:(x[0],x[1]))
+    
     if args.extra_plots:
-        hits, pt_cut_hits = hit_pool.hits, hit_pool.pt_cut_hits 
-        layer_tuples = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x:(x[0],x[1]))
+    
         print("Plotting detector and truth...")
         trk_plot.plot_hits_colored_by_layer(hits, layer_tuples)
         trk_plot.plot_layer_boundaries(hits, layer_tuples) 
         trk_plot.plot_truth_paths_rz(pt_cut_hits, max_tracks=None)
         trk_plot.plot_truth_paths_3d(pt_cut_hits, max_tracks=None)
+
+    with open('config.json') as f:
+        config = json.load(f)
     
-    brancher_config = {
-        'noise_std': 1.0,
-        'B_z': 0.002,
-        'num_branches': args.max_tracks_per_seed,
-        'survive_top': args.max_branches,
-        'max_cands': 10,
-        'step_candidates': 5
-    }
+    ekf_config = config['ekf_config']
+    astar_config = config['astar_config']
+    aco_config = config['aco_config']
+    aco_config['layers'] = layer_tuples
 
     track_builder = trk_builder.TrackBuilder(
         hit_pool=hit_pool,
-        brancher_cls=brancher,
-        brancher_config=brancher_config
+        brancher_cls={'ekf': HelixEKFBrancher, 'astar': HelixAStarBrancher, 'aco': HelixACOBrancher}[args.brancher],
+        brancher_config={'ekf': ekf_config, 'astar': astar_config, 'aco': aco_config}[args.brancher]
     )
 
     # 5. Build seeds and tracks in one pipeline
     print(f"Building seeds and tracks from truth hits...")
     completed_tracks = track_builder.build_tracks_from_truth(
         max_seeds=args.debug_n,
-        max_tracks_per_seed=args.max_tracks_per_seed,
-        max_branches=args.max_branches
+        max_tracks_per_seed=ekf_config['num_branches'],
+        max_branches=ekf_config['survive_top']
     )
 
     # 6. Plot seeds if requested
