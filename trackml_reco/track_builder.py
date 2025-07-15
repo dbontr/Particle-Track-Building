@@ -309,7 +309,7 @@ class TrackBuilder:
                 # This shouldn't happen with per-particle pruning, but just in case
                 print(f"  Restoring best track for particle {particle_id}")
         if PLOT_BRANCHES: 
-            trk_plot.plot_branches(branches_list, seed_points, future_layers, truth_hits=self.hit_pool.pt_cut_hits, particle_id=particle_id)
+            trk_plot.plot_branches(branches_list, seed_points, future_layers, hits_df=self.hit_pool.hits, truth_hits=self.hit_pool.pt_cut_hits, particle_id=particle_id)
     
     def _convert_branches_to_tracks(self, branches: List[Dict], particle_id: int, seed_row: pd.Series) -> None:
         """

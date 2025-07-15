@@ -1,5 +1,6 @@
 {
   "ekf_config": {
+    "layer_surfaces": null,
     "noise_std": 1.0,
     "B_z": 0.002,
     "num_branches": 30,

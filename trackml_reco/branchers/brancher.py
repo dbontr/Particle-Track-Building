@@ -1,5 +1,6 @@
 import abc
 import numpy as np
+import pandas as pd
 from typing import Tuple, Dict, List
 from scipy.spatial import cKDTree
 
@@ -21,6 +22,24 @@ class Brancher(abc.ABC):
                  noise_std: float=2.0,
                  B_z: float=0.002,
                  max_cands: int=10):
+        """
+        Initialize the track-building component with spatial search trees, detector layer info,
+        and Kalman filter parameters.
+
+        Parameters
+        ----------
+        trees : dict of tuple
+            Dictionary mapping (volume_id, layer_id) to a tuple:
+            (cKDTree, ndarray of hit coordinates, ndarray of hit IDs), used for spatial lookup.
+        layers : list of tuple
+            Ordered list of (volume_id, layer_id) tuples representing the tracking layers.
+        noise_std : float, optional
+            Standard deviation of the measurement noise (assumed isotropic in mm). Default is 2.0.
+        B_z : float, optional
+            Magnetic field strength along the z-axis in Tesla. Default is 0.002.
+        max_cands : int, optional
+            Maximum number of hit candidates to consider at each layer. Default is 10.
+        """
         self.trees       = trees
         self.layers      = layers
         self.noise_std   = noise_std
@@ -110,13 +129,13 @@ class Brancher(abc.ABC):
 
         Returns
         -------
-        tuple of (ndarray, ndarray, ndarray)
-            2D local position, 2x2 covariance in local frame, 2x3 Jacobian of transformation
+        tuple of (ndarray, ndarray)
+            2D local position and 2x2 covariance in local frame
         """
         H = self.to_local_frame_jac(plane_normal)
         meas = H @ (pos - plane_point)
         cov_local = H @ cov[:3, :3] @ H.T
-        return meas, cov_local, H
+        return meas, cov_local
 
 
 

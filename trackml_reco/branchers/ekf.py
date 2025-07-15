@@ -3,11 +3,13 @@ from typing import Tuple, Dict, List
 import matplotlib.pyplot as plt
 import networkx as nx
 from scipy.spatial import cKDTree
+from scipy.optimize import newton
 from trackml_reco.branchers.brancher import Brancher
 
 class HelixEKFBrancher(Brancher):
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple['cKDTree', np.ndarray, np.ndarray]],
+                 layer_surfaces,
                  noise_std: float = 2.0,
                  B_z: float = 0.002,
                  num_branches: int = 30,
@@ -21,10 +23,9 @@ class HelixEKFBrancher(Brancher):
         ----------
         trees : dict
             Dictionary mapping (volume_id, layer_id) to (cKDTree, points, hit_ids) for fast spatial lookup.
-        layers : list of tuple
-            Ordered list of (volume_id, layer_id) specifying the tracking layers.
-        true_xyzs : list of ndarray
-            True hit coordinates for performance metrics and optional use in gating.
+        layer_surfaces : list of dict
+            Surface geometry for each tracking layer, each described as either a disk or cylinder with
+            keys like 'type', 'n', 'p', or 'R'
         noise_std : float, optional
             Standard deviation of measurement noise. Default is 2.0.
         B_z : float, optional
@@ -55,9 +56,70 @@ class HelixEKFBrancher(Brancher):
         # gating thresholds
         self.inner_gate = 9.0
         self.outer_gate = 16.0
+        
+        self.layer_surfaces = layer_surfaces
+    
+    def _solve_dt_to_surface(self, x0: np.ndarray, surf: dict, dt_init: float = 1.0) -> float:
+        """
+        Solve for the time step `dt` that brings the current state to intersect the given surface.
 
-        self.layer_normals = np.array([0,0,1])
-        self.layer_points = np.array([0,0,0])
+        Parameters
+        ----------
+        x0 : ndarray
+            Initial state vector of shape (7,), representing the current particle state.
+        surf : dict
+            Surface geometry dictionary, either:
+                - Disk: {'type': 'disk', 'n': normal vector, 'p': point on plane}
+                - Cylinder: {'type': 'cylinder', 'R': radius}
+        dt_init : float, optional
+            Initial guess for the time step. Default is 1.0.
+
+        Returns
+        -------
+        float
+            Time step `dt` that brings the state to intersect the surface.
+        """
+        if surf['type']=='disk':
+            n, p = surf['n'], surf['p']
+            def f(dt):
+                return (self.propagate(x0,dt)[:3]-p).dot(n)
+        else:  # cylinder
+            R = surf['R']
+            def f(dt):
+                xyt = self.propagate(x0,dt)[:2]
+                return np.hypot(xyt[0], xyt[1]) - R
+
+        return newton(f, dt_init, maxiter=20, tol=1e-6)
+
+    def _get_candidates_in_gate(self, pred_pos: np.ndarray, layer: Tuple[int,int], radius: float):
+        """
+        Retrieve candidate hits within a gating radius from the predicted position.
+
+        Parameters
+        ----------
+        pred_pos : ndarray
+            Predicted 3D position (x, y, z) from the propagated particle state.
+        layer : tuple of int
+            (volume_id, layer_id) identifying the detector layer to search.
+        radius : float
+            Gating radius for spatial lookup.
+
+        Returns
+        -------
+        points_sel : ndarray
+            Array of selected hit positions closest to `pred_pos`.
+        ids_sel : ndarray
+            Corresponding hit IDs for the selected hits.
+        """
+        tree, points, ids = self.trees[layer]
+        idxs = tree.query_ball_point(pred_pos, r=radius)
+        points_sel = points[idxs]
+        d2 = np.linalg.norm(points_sel - pred_pos, axis=1)
+        # sort by distance and take up to step_candidates
+        order = np.argsort(d2)[:self.step_candidates]
+        sel = [idxs[i] for i in order]
+        return points[sel], ids[sel]
+    
 
     def run(self, seed_xyz: np.ndarray, layers: List, t: np.ndarray, plot_tree: bool = False) -> Tuple[List[Dict], nx.DiGraph]:
         """
@@ -77,8 +139,8 @@ class HelixEKFBrancher(Brancher):
         tuple
             (List of final branches, networkx.DiGraph representing the branching tree).
         """
-        dt = t[1] - t[0]
-        v0, κ0 = self._estimate_seed_helix(seed_xyz, dt, self.B_z)
+        dt0 = t[1] - t[0] if t is not None else 1.0
+        v0, κ0 = self._estimate_seed_helix(seed_xyz, dt0, self.B_z)
         x0 = np.hstack([seed_xyz[2], v0, κ0])
         P0 = np.eye(self.state_dim) * 0.1
 
@@ -88,37 +150,35 @@ class HelixEKFBrancher(Brancher):
         # uses truth level layers? 
         for i, layer in enumerate(layers):
             gate = self.inner_gate if i<3 else self.outer_gate
-            plane_n = self.layer_normals
-            plane_p = self.layer_points
+            surf = self.layer_surfaces[layer]
             new_br = []
-            for br in branches:
-                F = self.compute_F(br['state'], dt)
-                x_pred = self.propagate(br['state'], dt)
-                P_pred = F @ br['cov'] @ F.T + self.Q0 * dt
+            for br in branches:# 1) find the exact Δt so we hit this layer’s plane
+                try:
+                    dt_layer = self._solve_dt_to_surface(br['state'], surf, dt_init=dt0)
+                except (RuntimeError, OverflowError):
+                    continue
 
-                points_cand, id_cand = self._get_candidates(x_pred[:3], layer)
+                F      = self.compute_F(br['state'], dt_layer)
+                x_pred = self.propagate(br['state'], dt_layer)
+                P_pred = F @ br['cov'] @ F.T + self.Q0 * dt_layer
+
+                H = self.H_jac(None)  # 3×7
+                S = H @ P_pred @ H.T + self.R
+                
+                gate_r = 3.0 * np.sqrt(np.max(np.linalg.eigvalsh(S)))
+
+                points_cand, id_cand = self._get_candidates_in_gate(x_pred[:3], layer, gate_r)
                 for z, hid in zip(points_cand, id_cand):
-                    meas_pred, Puv, H2 = self.to_local_frame(x_pred[:3], P_pred, plane_n, plane_p)
-                    meas_z, Ruv, _ = self.to_local_frame(z, np.zeros((3,3)), plane_n, plane_p)
-                    Suv  = Puv + Ruv
-                    res_uv = meas_z - meas_pred
-                    chi2 = res_uv @ np.linalg.solve(Suv, res_uv)
+                    res = z - x_pred[:3]
+                    chi2 = float(res @ np.linalg.solve(S, res))
 
                     if chi2 < gate:
-                        Huv    = self.to_local_frame_jac(plane_n)        # 2×3
-                        H_full = np.zeros((2, self.state_dim))           # 2×7
-                        H_full[:, :3] = Huv
-
-                        K_uv = P_pred[:3, :3] @ Huv.T @ np.linalg.inv(Suv)  # 3×2
-                        K    = np.zeros((self.state_dim, 2))               # 7×2
-                        K[:3, :] = K_uv
-
-                        x_upd = x_pred + K @ res_uv
-                        P_upd = (np.eye(self.state_dim) - K @ H_full) @ P_pred
+                        K    = P_pred @ H.T @ np.linalg.inv(S)
+                        x_upd = x_pred + K @ res
+                        P_upd = (np.eye(self.state_dim) - K @ H) @ P_pred
                         score = br['score'] + chi2
                     else:
-                        x_upd = x_pred.copy()
-                        x_upd[6] += np.random.randn() * 1e-4
+                        x_upd = x_pred.copy(); x_upd[6] += np.random.randn() * 1e-4
                         P_upd = P_pred
                         score = br['score'] + chi2 + 5.0
 

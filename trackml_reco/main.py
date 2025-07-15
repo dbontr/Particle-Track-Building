@@ -28,13 +28,9 @@ def main():
     parser.add_argument('--plot', type=bool, default=True, 
                         help='plot graphs of tracks (default: True)')
     parser.add_argument('--extra-plots', type=bool, default=False, 
-                        help='displays extra presentation plots (default: True)')
-    parser.add_argument(
-    '--brancher', '-b',
-    type=str,
-    choices=['ekf', 'astar', 'aco'],
-    default='ekf',
-    metavar='BRANCHER',
+                        help='displays extra presentation plots (default: False)')
+    parser.add_argument('--brancher', '-b',type=str, choices=['ekf', 'astar', 'aco'],
+    default='ekf',metavar='BRANCHER',
     help=(
         "Branching strategy to use for the tracker. "
         "Options:\n"
@@ -52,7 +48,31 @@ def main():
     
     hits, pt_cut_hits = hit_pool.hits, hit_pool.pt_cut_hits 
     layer_tuples = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x:(x[0],x[1]))
-    
+    layer_surfaces = {}
+    for vol, lay in layer_tuples:
+        df = hits[(hits.volume_id==vol)&(hits.layer_id==lay)]
+        if df.empty: continue
+
+        z_span = df.z.max() - df.z.min()
+        r_vals = np.sqrt(df.x**2 + df.y**2)
+        r_span = r_vals.max() - r_vals.min()
+
+        if z_span < r_span * 0.1:
+            plane_n = np.array([0.,0.,1.])
+            plane_p = np.array([0.,0., df.z.mean()])
+            layer_surfaces[(vol,lay)] = {
+                'type': 'disk',
+                'n'   : plane_n,
+                'p'   : plane_p
+            }
+        else:
+            R = r_vals.mean()
+            layer_surfaces[(vol,lay)] = {
+                'type': 'cylinder',
+                'R'   : R
+            }
+
+
     if args.extra_plots:
     
         print("Plotting detector and truth...")
@@ -65,6 +85,7 @@ def main():
         config = json.load(f)
     
     ekf_config = config['ekf_config']
+    ekf_config['layer_surfaces'] = layer_surfaces
     astar_config = config['astar_config']
     aco_config = config['aco_config']
     aco_config['layers'] = layer_tuples

@@ -317,55 +317,127 @@ def plot_layer_boundaries(hits_df: pd.DataFrame, layer_tuples: List[Tuple[int, i
     plt.show()
 
     
-def plot_branches(branches: List[Dict], seed_points: List[np.ndarray], future_layers: List[Tuple[int, int]], 
-                 truth_hits: Optional[pd.DataFrame] = None, particle_id: Optional[int] = None) -> None:
+def plot_branches(branches: List[Dict], seed_points: List[np.ndarray], future_layers: List[Tuple[int, int]], hits_df: pd.DataFrame, 
+                  truth_hits: Optional[pd.DataFrame] = None, particle_id: Optional[int] = None, pad_frac: float = 0.05) -> None:
     """
-    Plots the branches of a track building process with different colors for each branch.
+    Draw layer‐boundaries in (z, r) and overlay track‐building branches,
+    seed points, and truth hits.
 
     Parameters
     ----------
     branches : List[Dict]
-        List of branch dictionaries, each containing 'traj', 'hit_ids', 'state', and 'cov' keys.
+        Each dict must have a `.trajectory` attribute or key containing
+        an Nx3 array or list of (x,y,z).
     seed_points : List[np.ndarray]
-        List of 3D seed points.
+        List of 3‑element arrays [x,y,z] for the seed.
     future_layers : List[Tuple[int, int]]
-        List of future layer tuples.
-    truth_hits : Optional[pd.DataFrame], default=None
-        DataFrame containing truth hits with columns ['x', 'y', 'z', 'particle_id'].
-    particle_id : Optional[int], default=None
-        Particle ID to filter truth hits. If None and truth_hits provided, uses first particle.
-    """ 
+        Not used directly here but kept for API compatibility.
+    hits_df : pd.DataFrame
+        Must contain columns ['x','y','z','volume_id','layer_id'].
+    layer_tuples : List[Tuple[int, int]]
+        (volume_id, layer_id) pairs for which to draw rectangles.
+    truth_hits : pd.DataFrame, optional
+        Must contain ['x','y','z','particle_id'] if provided.
+    particle_id : int, optional
+        If truth_hits is given, filters for this particle. If None,
+        uses the first unique ID found.
+    pad_frac : float
+        Fractional padding around global z and r ranges.
+    """
+    layer_tuples = sorted(set(zip(hits_df.volume_id, hits_df.layer_id)), key=lambda x:(x[0],x[1]))
+    # Compute global z/r extents for padding
+    z_all = hits_df['z']
+    r_all = np.sqrt(hits_df['x']**2 + hits_df['y']**2)
+    zmin_glob, zmax_glob = z_all.min(), z_all.max()
+    rmin_glob, rmax_glob = r_all.min(), r_all.max()
+    z_pad = (zmax_glob - zmin_glob) * pad_frac
+    r_pad = (rmax_glob - rmin_glob) * pad_frac
+
+    # Set up figure
     fig, ax = plt.subplots(figsize=(12, 8))
-    
-    truth_particle = truth_hits[truth_hits['particle_id'] == particle_id]
 
-    truth_r = np.sqrt(truth_particle['x']**2 + truth_particle['y']**2)
-    #ax.plot(truth_particle['z'], truth_r, 'k--', linewidth=2, alpha=0.8, label=f'Truth (PID {particle_id})')
-    ax.scatter(truth_particle['z'], truth_r, c='black', s=30, alpha=0.6, marker='s', label='Truth hits')
+    # 1) Draw each layer boundary rectangle
+    for vol_id, lay_id in layer_tuples:
+        layer_hits = hits_df[
+            (hits_df.volume_id == vol_id) &
+            (hits_df.layer_id == lay_id)
+        ]
+        if layer_hits.empty:
+            continue
 
-    # Plot branches with different colors
-    colors = plt.cm.Set3(np.linspace(0, 1, len(branches)))  # Use Set3 colormap for distinct colors
-    all_traj = []
+        z_vals = layer_hits['z']
+        r_vals = np.sqrt(layer_hits.x**2 + layer_hits.y**2)
+        zmin, zmax = z_vals.min(), z_vals.max()
+        rmin, rmax = r_vals.min(), r_vals.max()
+
+        rect = patches.Rectangle(
+            (zmin, rmin),
+            zmax - zmin,
+            rmax - rmin,
+            linewidth=1.2,
+            edgecolor='gray',
+            facecolor='none',
+            alpha=0.5,
+            linestyle='--'
+        )
+        ax.add_patch(rect)
+        ax.text(
+            (zmin + zmax) / 2,
+            (rmin + rmax) / 2,
+            f"{vol_id}_{lay_id}",
+            fontsize=8,
+            fontweight='bold',
+            ha='center',
+            va='center',
+            alpha=0.7
+        )
+
+    # 2) Plot truth hits (if any)
+    if truth_hits is not None and not truth_hits.empty:
+        if particle_id is None:
+            # default to first PID
+            particle_id = truth_hits['particle_id'].iat[0]
+        truth = truth_hits[truth_hits['particle_id'] == particle_id]
+        r_truth = np.sqrt(truth['x']**2 + truth['y']**2)
+        ax.scatter(
+            truth['z'], r_truth,
+            c='black', s=30, marker='s',
+            alpha=0.7, label=f"Truth hits (PID {particle_id})"
+        )
+
+    # 3) Plot all branch trajectories
+    colors = plt.cm.tab10(np.linspace(0, 1, len(branches)))
     for i, branch in enumerate(branches):
         traj = np.array(branch.trajectory)
-        r = np.sqrt(traj[:, 0]**2 + traj[:, 1]**2)
-        ax.plot(traj[:, 2], r, 'o-', color=colors[i], alpha=0.8, linewidth=2, 
-                label=f'Branch {i+1} ({len(traj)} points)')
-        all_traj.append(traj)
+        r_traj = np.sqrt(traj[:, 0]**2 + traj[:, 1]**2)
+        ax.plot(
+            traj[:, 2], r_traj,
+            marker='o', linestyle='-',
+            color=colors[i % len(colors)],
+            linewidth=2, alpha=0.8,
+            label=f"Branch {i+1} ({len(traj)} hits)"
+        )
 
-    seed_points_array = np.array(seed_points)
-    seed_r = np.sqrt(seed_points_array[:, 0]**2 + seed_points_array[:, 1]**2)
-    ax.scatter(seed_points_array[:, 2], seed_r, c='red', s=100, marker='*', 
-               label='Seed points', zorder=10, edgecolors='black', linewidth=1)
-    plt.title(f'Track Building Branches (R-Z View) for Particle {particle_id}')
-    ax.set_xlabel('z (m)')
-    ax.set_ylabel('r (m)')
-    ax.set_title('Track Building Branches (R-Z View)')
+    # 4) Plot seed points
+    sp = np.vstack(seed_points)
+    r_sp = np.sqrt(sp[:, 0]**2 + sp[:, 1]**2)
+    ax.scatter(
+        sp[:, 2], r_sp,
+        c='red', marker='*', s=120,
+        edgecolors='k', linewidth=1,
+        label='Seed points', zorder=10
+    )
+
+    # Final styling
+    ax.set_xlim(zmin_glob - z_pad, zmax_glob + z_pad)
+    ax.set_ylim(rmin_glob - r_pad, rmax_glob + r_pad)
+    ax.set_xlabel('z (mm)', fontsize=12)
+    ax.set_ylabel('r (mm)', fontsize=12)
+    ax.set_title('Track Building Branches over Layer Boundaries (R–Z view)', fontsize=14)
     ax.grid(True, alpha=0.3)
-    ax.legend(bbox_to_anchor=(1.05, 1), loc='upper left')
+    ax.legend(loc='upper left', bbox_to_anchor=(1.02, 1))
     plt.tight_layout()
     plt.show()
-
 
 def plot_track_building_debug(track_builder, seed_row: pd.Series, branches: List[Dict], 
                             max_branches_to_plot: int = 10) -> None:
@@ -406,6 +478,7 @@ def plot_track_building_debug(track_builder, seed_row: pd.Series, branches: List
         branches=branches_to_plot,
         seed_points=seed_points,
         future_layers=seed_row['future_layers'],
+        hits_df=track_builder.hits,
         truth_hits=track_builder.hit_pool.pt_cut_hits,
         particle_id=particle_id
     )
