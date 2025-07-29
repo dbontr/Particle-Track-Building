@@ -1,138 +1,149 @@
 import numpy as np
+import random
 from typing import Tuple, Dict, List
-import matplotlib.pyplot as plt
-import networkx as nx
 from scipy.spatial import cKDTree
+import networkx as nx
 from trackml_reco.branchers.brancher import Brancher
 
-class HelixACOBrancher(Brancher):
-    def __init__(
-        self,
-        trees: Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]],
-        layers: List[Tuple[int, int]],
-        noise_std: float = 2.0,
-        B_z: float = 0.002,
-        num_ants: int = 50,
-        num_iter: int = 10,
-        alpha: float = 1.0,
-        beta: float = 2.0,
-        rho: float = 0.1,
-        max_cands: int = 10
-    ):
-        """
-        Initializes the ACO tracker using pheromone trails to bias path search.
-
-        Parameters
-        ----------
-        trees : dict
-            Mapping (volume_id, layer_id) to (cKDTree, points array, hit IDs array).
-        layers : list of tuple
-            Ordered list of detector layer identifiers.
-        noise_std : float, optional
-            Measurement noise standard deviation (default 2.0).
-        B_z : float, optional
-            Magnetic field along z-axis (Tesla, default 0.002).
-        num_ants : int, optional
-            Number of ants per iteration (default 50).
-        num_iter : int, optional
-            Number of ACO iterations (default 10).
-        alpha : float, optional
-            Pheromone importance coefficient (default 1.0).
-        beta : float, optional
-            Heuristic importance coefficient (default 2.0).
-        rho : float, optional
-            Pheromone evaporation rate (default 0.1).
-        max_cands : int, optional
-            Maximum hit candidates per layer (default 10).
-        """
-        self.trees = trees
-        self.layers = layers
-        self.noise_std = noise_std
-        self.B_z = B_z
-        self.num_ants = num_ants
-        self.num_iter = num_iter
+class HelixEKFACOBrancher(Brancher):
+    """
+    EKF-based track finder using Ant Colony Optimization (ACO) instead of branching.
+    Each "ant" stochastically picks one candidate per layer based on pheromone + heuristic,
+    then pheromones are updated to reinforce low-chi2 paths.
+    """
+    def __init__(self,
+                 trees: Dict[Tuple[int,int], Tuple[cKDTree, np.ndarray, np.ndarray]],
+                 layer_surfaces: Dict[Tuple[int,int], dict],
+                 noise_std: float = 2.0,
+                 B_z: float = 0.002,
+                 n_ants: int = 20,
+                 evap_rate: float = 0.5,
+                 alpha: float = 1.0,
+                 beta: float = 2.0,
+                 max_cands: int = 10,
+                 step_candidates: int = 5):
+        super().__init__(trees=trees,
+                         layers=list(layer_surfaces.keys()),
+                         noise_std=noise_std,
+                         B_z=B_z,
+                         max_cands=max_cands)
+        self.layer_surfaces = layer_surfaces
+        self.n_ants = n_ants
+        self.evap_rate = evap_rate
         self.alpha = alpha
         self.beta = beta
-        self.rho = rho
-        self.max_cands = max_cands
-        # measurement and process noise
-        self.R = (noise_std**2) * np.eye(3)
-        self.Q0 = np.diag([1e-4]*3 + [1e-5]*3 + [1e-6]) * noise_std
-        # initialize pheromone: one matrix per layer transition
-        self.pheromone = [np.ones((max_cands,)) for _ in range(len(layers)-1)]
-        # placeholder for geometry
-        self.layer_normals = {lay: np.array([0,0,1]) for lay in layers}
-        self.layer_points  = {lay: np.array([0,0,0]) for lay in layers}
+        self.step_candidates = step_candidates
+        self.state_dim = 7
 
-    def _update_pheromones(self, all_paths: List[List[int]], costs: List[float]) -> None:
+    def _ant_walk(self,
+                  seed_xyz: np.ndarray,
+                  t: np.ndarray,
+                  layers: List[Tuple[int,int]],
+                  pheromone: Dict) -> Dict:
         """
-        Update pheromone trails based on paths and their costs.
-
-        Parameters
-        ----------
-        all_paths : list of list of int
-            Each sublist contains indices of chosen candidates per layer for an ant.
-        costs : list of float
-            Corresponding total costs for each path (lower is better).
+        Single ant path through the specified candidate layers.
         """
-        # evaporate existing pheromone
-        for t in range(len(self.pheromone)):
-            self.pheromone[t] *= (1 - self.rho)
-        # deposit new pheromone
-        for path, cost in zip(all_paths, costs):
-            deposit = 1.0 / (cost + 1e-6)
-            for layer_idx, cand_idx in enumerate(path[:-1]):
-                self.pheromone[layer_idx][cand_idx] += deposit
-
-    def run(
-        self,
-        seed_xyz: np.ndarray,
-        t: np.ndarray,
-        plot: bool = False
-    ) -> Tuple[Dict, nx.DiGraph]:
-        """
-        Executes the ACO search over multiple iterations to find the best track.
-
-        Parameters
-        ----------
-        seed_xyz : ndarray
-            Initial three 3D hit coordinates for seeding the track.
-        t : ndarray
-            Time array for seed and layer time steps.
-        plot : bool, optional
-            If True, plots the best found track in the XY plane (default: False).
-
-        Returns
-        -------
-        best_branch : dict
-            Contains the best track's 'traj', 'hit_ids', and 'score'.
-        G : networkx.DiGraph
-            Graph of ant explorations (for diagnostics).
-        """
-        # ACO logic placeholder
-        best_branch = {'hit_ids': [], 'score': np.inf, 'traj': []}
+        dt0 = t[1] - t[0] if t is not None else 1.0
+        v0, k0 = self._estimate_seed_helix(seed_xyz, dt0, self.B_z)
+        state = np.hstack([seed_xyz[2], v0, k0])
+        cov = np.eye(self.state_dim) * 0.1
+        traj = [seed_xyz[0], seed_xyz[1], seed_xyz[2]]
+        hit_ids: List[int] = []
+        layers_used: List[Tuple[int,int]] = []
+        total_score = 0.0
         G = nx.DiGraph()
-        return best_branch, G
 
-    def _plot_tree(self, G: nx.DiGraph) -> None:
+        for i, layer in enumerate(layers):
+            surf = self.layer_surfaces[layer]
+            try:
+                dt = self._solve_dt_to_surface(state, surf)
+            except Exception:
+                break
+
+            F = self.compute_F(state, dt)
+            x_pred = self.propagate(state, dt)
+            P_pred = F @ cov @ F.T + self.Q0 * dt
+            H = self.H_jac(None)
+            S = H @ P_pred @ H.T + self.R
+            gate_r = 3.0 * np.sqrt(np.max(np.linalg.eigvalsh(S)))
+
+            pts, ids = self._get_candidates_in_gate(x_pred[:3], layer, gate_r)
+            if len(ids) == 0:
+                break
+
+            costs = np.array([float((p - x_pred[:3]) @ np.linalg.solve(S, p - x_pred[:3])) + 1e-6 for p in pts])
+            tau = np.array([pheromone.get((layer, int(hid)), 1.0) for hid in ids])
+            eta = 1.0 / costs
+            probs = (tau**self.alpha) * (eta**self.beta)
+            probs = probs / np.sum(probs)
+
+            idx = np.random.choice(len(ids), p=probs)
+            chosen_pt, chosen_id, chi2 = pts[idx], ids[idx], costs[idx]
+
+            # EKF update
+            K = P_pred @ H.T @ np.linalg.inv(S)
+            state = x_pred + K @ (chosen_pt - x_pred[:3])
+            cov = (np.eye(self.state_dim) - K @ H) @ P_pred
+
+            traj.append(chosen_pt)
+            hit_ids.append(int(chosen_id))
+            layers_used.append(layer)
+            total_score += chi2
+            G.add_edge((i, tuple(traj[-2])), (i+1, tuple(chosen_pt)), cost=chi2)
+
+        return {
+            'traj': traj,
+            'hit_ids': hit_ids,
+            'layers': layers_used,
+            'state': state,
+            'cov': cov,
+            'score': total_score,
+            'graph': G
+        }
+
+    def run(self,
+            seed_xyz: np.ndarray,
+            layers: List[Tuple[int,int]],
+            t: np.ndarray,
+            plot_tree: bool = False) -> Tuple[List[Dict], nx.DiGraph]:
         """
-        Plots the pheromone‐biased exploration graph in an XY projection.
-
-        Parameters
-        ----------
-        G : networkx.DiGraph
-            Directed graph representing ant exploration nodes and edges.
-
-        Returns
-        -------
-        None
+        Run ACO over the specified future_layers sequence, not every detector layer.
         """
-        pos = {n: tuple(G.nodes[n]['pos'][:2]) for n in G.nodes()}
-        plt.figure(figsize=(8,8))
-        nx.draw(G, pos, with_labels=False, node_size=20)
-        plt.title('ACO exploration XY')
-        plt.show()
+        # Initialize pheromone on each (layer, hit)
+        pheromone: Dict[Tuple[Tuple[int,int], int], float] = {}
+        for layer in layers:
+            _, _, ids = self.trees[layer]
+            for hid in ids:
+                pheromone[(layer, int(hid))] = 1.0
 
+        best_branch = None
+        best_score = np.inf
+        global_graph = nx.DiGraph()
 
+        # Each ant walks only through the `layers` list
+        for _ in range(self.n_ants):
+            branch = self._ant_walk(seed_xyz, t, layers, pheromone)
+            delta = 1.0 / (branch['score'] + 1e-6)
 
+            # Update pheromone only on used (layer, hit)
+            for layer, hid in zip(branch['layers'], branch['hit_ids']):
+                key = (layer, int(hid))
+                pheromone[key] = (
+                    (1 - self.evap_rate) * pheromone.get(key, 0.0)
+                    + self.evap_rate * delta
+                )
 
+            if branch['score'] < best_score:
+                best_score = branch['score']
+                best_branch = branch
+            global_graph = nx.compose(global_graph, branch['graph'])
+
+        # Format for TrackBuilder compatibility
+        result = {
+            'traj': best_branch['traj'],
+            'hit_ids': best_branch['hit_ids'],
+            'state': best_branch['state'],
+            'cov': best_branch['cov'],
+            'score': best_branch['score']
+        }
+        return [result], global_graph

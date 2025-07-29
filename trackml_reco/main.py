@@ -5,8 +5,12 @@ import pandas as pd
 import matplotlib.pyplot as plt
 from trackml.score import score_event
 from trackml_reco.branchers.ekf import HelixEKFBrancher
-from trackml_reco.branchers.astar import HelixAStarBrancher
-from trackml_reco.branchers.aco import HelixACOBrancher
+from trackml_reco.branchers.astar import HelixEKFAStarBrancher
+from trackml_reco.branchers.aco import HelixEKFACOBrancher
+from trackml_reco.branchers.pso import HelixEKFPSOBrancher
+from trackml_reco.branchers.sa import HelixEKFSABrancher
+from trackml_reco.branchers.ga import HelixEKFGABrancher
+from trackml_reco.branchers.hungarian import HelixEKFHungarianBrancher
 import trackml_reco.data as trk_data
 import trackml_reco.plotting as trk_plot
 import trackml_reco.trees as trk_trees
@@ -15,7 +19,18 @@ import trackml_reco.hit_pool as trk_hit_pool
 import trackml_reco.metrics as trk_metrics
 
 
+
 def main():
+    brancher_keys = ['ekf', 'astar', 'aco', 'pso', 'sa', 'ga', 'hungarian']
+    brancher_cls_map = {
+        'ekf': HelixEKFBrancher,
+        'astar': HelixEKFAStarBrancher,
+        'aco': HelixEKFACOBrancher,
+        'pso': HelixEKFPSOBrancher,
+        'sa': HelixEKFSABrancher,
+        'ga': HelixEKFGABrancher,
+        'hungarian': HelixEKFHungarianBrancher
+    }
     parser = argparse.ArgumentParser(
         description="Run refactored track building on a TrackML event"
     )
@@ -29,16 +44,20 @@ def main():
                         help='plot graphs of tracks (default: True)')
     parser.add_argument('--extra-plots', type=bool, default=False, 
                         help='displays extra presentation plots (default: False)')
-    parser.add_argument('--brancher', '-b',type=str, choices=['ekf', 'astar', 'aco'],
+    parser.add_argument('--brancher', '-b',type=str, choices=brancher_keys,
     default='ekf',metavar='BRANCHER',
-    help=(
-        "Branching strategy to use for the tracker. "
-        "Options:\n"
-        "  ekf   - Extended Kalman Filter branching\n"
-        "  astar - A* search-based branching\n"
-        "  aco   - Ant Colony Optimization-based branching\n"
-        "(default: 'ekf')"
-    ))
+    help=("""
+        Branching strategy to use for the tracker.
+        Options:
+        ekf        - Extended Kalman Filter branching
+        astar      - A* search-based branching
+        aco        - Ant Colony Optimization-based branching
+        pso        - Particle Swarm Optimization-based branching
+        sa         - Simulated Annealing-based branching
+        ga         - Genetic Algorithm-based branching
+        hungarian  - Hungarian Algorithm for optimal hit-to-track assignment
+        (default: 'ekf')
+        """))
     
     args = parser.parse_args()
 
@@ -74,7 +93,6 @@ def main():
 
 
     if args.extra_plots:
-    
         print("Plotting detector and truth...")
         trk_plot.plot_hits_colored_by_layer(hits, layer_tuples)
         trk_plot.plot_layer_boundaries(hits, layer_tuples) 
@@ -83,25 +101,28 @@ def main():
 
     with open('config.json') as f:
         config = json.load(f)
+
+    # Set layer_surfaces for each config
+    for key in brancher_keys:
+        config_key = f"ekf{key}_config" if key != "ekf" else "ekf_config"
+        config[config_key]['layer_surfaces'] = layer_surfaces
+
+    # Build the appropriate config and brancher class dynamically
+    brancher_config_key = f"ekf{args.brancher}_config" if args.brancher != "ekf" else "ekf_config"
     
-    ekf_config = config['ekf_config']
-    ekf_config['layer_surfaces'] = layer_surfaces
-    astar_config = config['astar_config']
-    aco_config = config['aco_config']
-    aco_config['layers'] = layer_tuples
 
     track_builder = trk_builder.TrackBuilder(
         hit_pool=hit_pool,
-        brancher_cls={'ekf': HelixEKFBrancher, 'astar': HelixAStarBrancher, 'aco': HelixACOBrancher}[args.brancher],
-        brancher_config={'ekf': ekf_config, 'astar': astar_config, 'aco': aco_config}[args.brancher]
+        brancher_cls=brancher_cls_map[args.brancher],
+        brancher_config=config[brancher_config_key]
     )
 
-    # 5. Build seeds and tracks in one pipeline
-    print(f"Building seeds and tracks from truth hits...")
+    # Build seeds and tracks
+    print("Building seeds and tracks from truth hits...")
     completed_tracks = track_builder.build_tracks_from_truth(
         max_seeds=args.debug_n,
-        max_tracks_per_seed=ekf_config['num_branches'],
-        max_branches=ekf_config['survive_top']
+        max_tracks_per_seed=config['ekf_config']['num_branches'],  # Still from base EKF config
+        max_branches=config['ekf_config']['survive_top']
     )
 
     # 6. Plot seeds if requested
