@@ -11,14 +11,13 @@ from trackml_reco.branchers.pso import HelixEKFPSOBrancher
 from trackml_reco.branchers.sa import HelixEKFSABrancher
 from trackml_reco.branchers.ga import HelixEKFGABrancher
 from trackml_reco.branchers.hungarian import HelixEKFHungarianBrancher
+from trackml_reco.track_builder import TrackBuilder
+from trackml_reco.parallel_track_builder import CollaborativeParallelTrackBuilder
 import trackml_reco.data as trk_data
 import trackml_reco.plotting as trk_plot
 import trackml_reco.trees as trk_trees
-import trackml_reco.track_builder as trk_builder
 import trackml_reco.hit_pool as trk_hit_pool
 import trackml_reco.metrics as trk_metrics
-
-
 
 def main():
     brancher_keys = ['ekf', 'astar', 'aco', 'pso', 'sa', 'ga', 'hungarian']
@@ -39,11 +38,13 @@ def main():
     parser.add_argument('--pt','-p', type=float, default=2.0,
                         help='minimum pT threshold in GeV (default: 2.0)')
     parser.add_argument('--debug-n','-d', type=int, default=None, 
-                        help='if set, only process this many seeds')
+                        help='if set, only process this many seeds (default: None)')
     parser.add_argument('--plot', type=bool, default=True, 
                         help='plot graphs of tracks (default: True)')
     parser.add_argument('--extra-plots', type=bool, default=False, 
                         help='displays extra presentation plots (default: False)')
+    parser.add_argument('--parallel', type=bool, default=False, 
+                        help='toggles parallel collaborative track building (default: False)')
     parser.add_argument('--brancher', '-b',type=str, choices=brancher_keys,
     default='ekf',metavar='BRANCHER',
     help=("""
@@ -110,8 +111,10 @@ def main():
     # Build the appropriate config and brancher class dynamically
     brancher_config_key = f"ekf{args.brancher}_config" if args.brancher != "ekf" else "ekf_config"
     
+    
+    track_builder_type = CollaborativeParallelTrackBuilder if args.parallel else TrackBuilder
 
-    track_builder = trk_builder.TrackBuilder(
+    track_builder = track_builder_type(
         hit_pool=hit_pool,
         brancher_cls=brancher_cls_map[args.brancher],
         brancher_config=config[brancher_config_key]
@@ -204,7 +207,7 @@ def main():
             ax.set_title(f'Track {i+1} (PID {track.particle_id})')
             ax.legend()
             plt.show()
-        
+    
     if submission_list:
         submission_df = pd.DataFrame(submission_list).drop_duplicates('hit_id')
         score = score_event(

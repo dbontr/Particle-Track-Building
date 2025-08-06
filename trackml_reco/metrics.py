@@ -1,4 +1,5 @@
 import numpy as np
+from scipy.spatial.distance import cdist
 from typing import Tuple, Dict
 from scipy.spatial import cKDTree
 
@@ -69,6 +70,20 @@ def branch_hit_stats(branch: Dict, true_xyz: np.ndarray, threshold: float = 1.0)
     """
     traj=np.array(branch['traj'][3:])
     true_points=np.array(true_xyz)
-    dists=np.linalg.norm(traj-true_points,axis=1)
-    true_hits=np.sum(dists<threshold)
-    return true_hits/len(true_points)*100,len(true_points)-true_hits
+    if traj.shape[0] == 0 or true_points.size == 0:
+        return 0.0, len(true_points)
+
+    # if same length, compute pointwise distances
+    if traj.shape[0] == true_points.shape[0]:
+        dists = np.linalg.norm(traj - true_points, axis=1)
+    else:
+        # nearest‐neighbor distance from each true hit to any recon point
+        dists = np.min(cdist(true_points, traj), axis=1)
+
+    # count matched hits
+    matched = np.sum(dists < threshold)
+    total = len(true_points)
+    pct_matched = 100.0 * matched / total
+    missed = total - matched
+
+    return pct_matched, missed

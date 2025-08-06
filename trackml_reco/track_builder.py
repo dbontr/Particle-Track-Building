@@ -187,7 +187,6 @@ class TrackBuilder:
                 # Get future hits for this particle
                 future_hits = remaining_hits[remaining_hits['particle_id'] == particle_id]
                 future_layers = list(zip(future_hits['volume_id'].values, future_hits['layer_id'].values))
-                print(future_layers)
                 # Create a row for each seed point with the same future layer information
                 for i, (_, row) in enumerate(group.iterrows()):
                     seed_row = row.copy()
@@ -430,9 +429,8 @@ class TrackBuilder:
             'assigned_hits': len(self.hit_pool._assigned_hits),
             'available_hits': self.hit_pool.get_available_hit_count(),
             'total_hits': len(self.hit_pool.hits),
-            'assignment_ratio': self.hit_pool.get_assignment_ratio(),
-            'layer_stats': self.hit_pool.get_layer_statistics()
-        }
+            'assignment_ratio': self.hit_pool.get_assignment_ratio()
+        } # 'layer_stats': self.hit_pool.get_layer_statistics()
     
     def get_seeds_dataframe(self) -> pd.DataFrame:
         """
