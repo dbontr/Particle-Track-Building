@@ -20,9 +20,8 @@ z' &= z + s\tan\lambda ,
 \end{aligned}
 $$
 
-while the EKF prediction–update cycle transports the state and covariance with gating based on $\chi^2 = r^\top S^{-1} r$ [9,19].
-Starting from three-hit seeds, the framework explores candidate assignments with algorithms ranging from the baseline EKF to A*,
-Ant Colony Optimization, Genetic Algorithms, Particle Swarm Optimization, Simulated Annealing, and layer-wise Hungarian matching.
+while the EKF prediction–update cycle transports the state and covariance.
+Measurements $\mathbf{z}=h(\mathbf{x})+\mathbf{w}$ with innovation $r=\mathbf{z}-h(\mathbf{x}_{k|k-1})$ are gated using $S = H P H^T + R$ and the test statistic $\chi^2 = r^\top S^{-1} r$ [9,19,21]. Starting from three-hit seeds, the framework explores candidate assignments with algorithms ranging from the baseline EKF to A*, Ant Colony Optimization, Genetic Algorithms, Particle Swarm Optimization, Simulated Annealing, and layer-wise Hungarian matching [22].
 
 ## Brancher Algorithms
 
@@ -123,15 +122,21 @@ Top-level files:
 
 2. **Download Dataset**:
 
-     You will also need the TrackML Particle Identification data, available from the [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules).
+     Obtain the TrackML Particle Identification dataset from the
+     [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules)
+     and place the desired event ``.zip`` files (e.g. ``train_1.zip``) in a known location.
 
-3. **Run the Main**:
+3. **Run Reconstruction**:
 
      ```bash
-     python main.py --file train_1.zip --pt 2.0
+     python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --pt 2.0
      ```
 
-4. **Visualize**: set `PLOT=True` to generate 2D/3D plots of hits, seeds, and the branching tree.
+     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,
+     ``ga``, ``hungarian``) and adjust ``--config`` to use a custom
+     JSON configuration.  Use ``-h`` for the full list of options.
+
+4. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
 
 ## References
 
@@ -155,5 +160,7 @@ Top-level files:
 18. Kuhn, “The Hungarian Method for the Assignment Problem,” Nav. Res. Logist. Q. **2**, 83–97 (1955).
 19. Frühwirth, “Application of Kalman filtering to track and vertex fitting,” Nucl. Instrum. Methods A **262**, 444–450 (1987).
 20. Blum, Riegler & Rolandi, _Particle Detection with Drift Chambers_, 2nd ed., Springer (2008).
+21. Bar-Shalom, Li & Kirubarajan, _Estimation with Applications to Tracking and Navigation_, 2nd ed., Wiley (2001).
+22. Eiben & Smith, _Introduction to Evolutionary Computing_, 2nd ed., Springer (2015).
 
 _Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry._
