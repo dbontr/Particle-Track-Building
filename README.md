@@ -7,9 +7,15 @@ $$
 \mathbf{x} = (x, y, z, \phi, \tan\lambda, q/p_T)^{\top},
 $$
 
-where $q$ is the particle charge and $p_T$ its transverse momentum. In a solenoidal field $B\hat{z}$ the trajectory follows a
-helix with curvature $\kappa = qB/p_T$ and radius $R = 1/\kappa$ [1,20]. Propagation over an arc length $s$ updates the
-parameters as
+where $q$ is the particle charge and $p_T$ its transverse momentum. The polar angle $\lambda$ relates longitudinal and transverse momenta via $\tan\lambda = p_z/p_T$, so $p = p_T \sqrt{1 + \tan^2\lambda}$. Under the Lorentz force
+$$
+\dot{\mathbf{p}} = q\,\mathbf{v}\times B\hat{z} = qB\begin{pmatrix} v_y\\-v_x\\0 \end{pmatrix},
+$$
+the transverse momentum components obey $\dot p_x = qB v_y$ and $\dot p_y = -qB v_x$, yielding uniform circular motion with constant $p_T$ while $\dot p_z = 0$ so $p_z$ and $\lambda$ remain unchanged [5].  The azimuthal angle therefore advances at
+$
+\frac{d\phi}{dt} = \frac{qB}{p} = \omega,
+$
+and, using arc length $s = vt$, one has $d\phi/ds = qB/p_T \equiv \kappa$.  In a solenoidal field $B\hat{z}$ the trajectory thus traces a helix of curvature $\kappa$ and radius $R = 1/\kappa = p_T/(qB)$ [1,20]. Integrating the angular increment over an arc length $s$ updates the parameters as
 
 $$
 \begin{aligned}
@@ -37,6 +43,8 @@ F =
 \end{pmatrix},
 $$
 
+The $\phi$– and $x$–rows depend explicitly on the curvature $\kappa = B(q/p_T)$.  Differentiating $\phi' = \phi + \kappa s$ gives $\partial\phi'/\partial(q/p_T) = B s$, while the derivative $\partial x'/\partial(q/p_T)$ follows from $R = 1/\kappa$ and the trigonometric shifts, leading to the small-$s$ term $-B s\, q/p_T^2$ shown above.
+
 while planar sensor modules measuring Cartesian positions employ
 
 $$
@@ -50,12 +58,7 @@ H =
 \end{pmatrix}.
 $$
 
-Stochastic effects from multiple scattering and energy loss are encoded in
-the process noise $Q$. Using the Highland expression [25] for the RMS
-scattering angle $\theta_0 = 13.6\,\text{MeV}/(p\beta)\,\sqrt{x/X_0}\,[1+0.038\ln(x/X_0)]$, the angular covariances are
-approximated as $Q_{\phi\phi} = Q_{\lambda\lambda} = \theta_0^2$ with
-remaining elements filled via kinematic relations [3,20]. The prediction and
-update equations become
+Stochastic effects from multiple scattering and energy loss are encoded in the process noise $Q$. Using the Highland expression [25] or the Particle Data Group recommendation [26] for the RMS scattering angle $\theta_0 = 13.6\,\text{MeV}/(p\beta)\,\sqrt{x/X_0}\,[1+0.038\ln(x/X_0)]$, the angular covariances are approximated as $Q_{\phi\phi} = Q_{\lambda\lambda} = \theta_0^2$.  For a thin scatterer this can be cast as $Q = G\,\text{diag}(\theta_0^2,\theta_0^2)G^\top$, where $G$ projects kicks in $(\phi,\lambda)$ into the full state basis and remaining elements are filled via kinematic relations [3,20]. The prediction and update equations become
 
 $$
 \begin{aligned}
@@ -244,5 +247,6 @@ Top-level files:
 23. Cerati _et al._, "Parallelized Kalman Filter Tracking on Many-Core Processors and GPUs," J. Phys.: Conf. Ser. **608**, 012057 (2015).
 24. Klijnsma _et al._, "Multi-threaded and vectorized Kalman Filter tracking for the CMS experiment," Comput. Softw. Big Sci. **3**, 11 (2019).
 25. Highland, "Some Practical Remarks on Multiple Scattering," Nucl. Instrum. Methods **129**, 497–499 (1975).
+26. Particle Data Group, P.A. Zyla _et al._, "Review of Particle Physics," Prog. Theor. Exp. Phys. **2024**, 083C01 (2024).
 
 _Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry._
