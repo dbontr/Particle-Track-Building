@@ -17,7 +17,18 @@ logger = logging.getLogger(__name__)
 PLOT_BRANCHES = True
 
 class TrackStatus(Enum):
-    """Enum representing the status of a track candidate."""
+    r"""
+    Enumeration for the lifecycle state of a track candidate.
+
+    Members
+    -------
+    ACTIVE
+        Track is still being extended (not all planned layers have been visited).
+    COMPLETED
+        Track reached its intended terminal layer set and is considered finished.
+    DEAD
+        Track can no longer be extended (e.g., ran out of valid hits).
+    """
     ACTIVE = "active"      # Still being built
     COMPLETED = "completed"  # Reached final layer
     DEAD = "dead"          # No valid hits found
@@ -25,31 +36,39 @@ class TrackStatus(Enum):
 
 @dataclass
 class TrackCandidate:
-    """
-    Data class for a single track candidate during building.
+    r"""
+    Container for a single track hypothesis during building.
 
     Attributes
     ----------
     id : int
-        Unique track identifier.
+        Global identifier for this track hypothesis.
     particle_id : int
-        Identifier of the originating particle.
-    trajectory : List[np.ndarray]
-        Sequence of 3D positions associated with the track.
-    hit_ids : List[int]
-        IDs of hits assigned to this track.
-    state : np.ndarray
-        Current Extended Kalman Filter state vector (7,).
-    covariance : np.ndarray
-        Current EKF covariance matrix (7x7).
+        Ground-truth particle identifier associated to this track (if known).
+    trajectory : list of ndarray
+        Ordered 3D positions :math:`[\mathbf{x}_0,\ldots,\mathbf{x}_k]` used for this track
+        (measured hit positions in most branchers).
+    hit_ids : list of int
+        Hit identifiers consumed by this track in the same order as ``trajectory`` (after seeds).
+    state : ndarray, shape (7,)
+        Current EKF state vector.
+    covariance : ndarray, shape (7, 7)
+        Current EKF state covariance.
     score : float
-        Accumulated chi-square score.
+        Accumulated data-term, typically a sum of Mahalanobis distances:
+
+        .. math::
+
+            \text{score} \;\equiv\; \sum_{i} \left(\mathbf{z}_i - H \hat{\mathbf{x}}_i\right)^\top
+            S_i^{-1} \left(\mathbf{z}_i - H \hat{\mathbf{x}}_i\right),
+
+        where :math:`S_i = H P_i H^\top + R`.
     status : TrackStatus
-        Current track status.
-    parent_id : Optional[int]
-        ID of parent track, if branched.
-    seed_row : Optional[pd.Series]
-        Reference to the seed row that initiated this track.
+        Current status flag (``ACTIVE``, ``COMPLETED``, or ``DEAD``).
+    parent_id : int, optional
+        Parent track ID if this candidate was created by branching.
+    seed_row : pandas.Series, optional
+        Reference to the seed row used to start this track (for debugging/plotting).
     """
     id: int
     particle_id: int
@@ -65,21 +84,25 @@ class TrackCandidate:
     def add_hit(self, position: np.ndarray, hit_id: int, 
                 new_state: np.ndarray, new_covariance: np.ndarray, 
                 chi2_contribution: float) -> None:
-        """
-        Append a new hit measurement to this track candidate.
+        r"""
+        Append a new measurement to the track and update EKF state/score.
 
         Parameters
         ----------
-        position : np.ndarray
-            3-element array of the hit position.
+        position : ndarray, shape (3,)
+            Measured hit position :math:`\mathbf{z}` appended to the trajectory.
         hit_id : int
-            Identifier of the hit.
-        new_state : np.ndarray
-            Updated EKF state after measurement update.
-        new_covariance : np.ndarray
-            Updated EKF covariance after measurement update.
+            Identifier of the consumed hit.
+        new_state : ndarray, shape (7,)
+            EKF posterior state after incorporating the measurement.
+        new_covariance : ndarray, shape (7, 7)
+            EKF posterior covariance.
         chi2_contribution : float
-            Chi-square contribution from this hit.
+            Incremental Mahalanobis distance :math:`(\mathbf{z}-H\hat{\mathbf{x}})^\top S^{-1} (\mathbf{z}-H\hat{\mathbf{x}})`.
+
+        Returns
+        -------
+        None
         """
         self.trajectory.append(position)
         self.hit_ids.append(hit_id)
@@ -89,41 +112,29 @@ class TrackCandidate:
 
 
 class TrackBuilder:
-    """
-    Class to build tracks from seed hits using branching EKF.
+    r"""
+    Build tracks from seed hits using a branching EKF strategy.
 
-    Methods
-    -------
-    build_seeds_from_truth
-        Generate seed points by grouping true hits and optionally applying jitter.
-    build_tracks_from_truth
-        Full pipeline: seeds generation followed by track building.
-    build_tracks_from_seeds
-        Build tracks from a DataFrame of seed points.
-    get_best_tracks
-        Retrieve best completed tracks by chi-square score.
-    get_track_statistics
-        Summary statistics of the building process.
-    reset
-        Reset builder state to initial conditions.
+    The builder orchestrates:
+
+    1. **Seed extraction** from truth hits (three points per particle).
+    2. **Brancher execution** (propagation, gating, updates) via :class:`~trackml_reco.branchers.brancher.Brancher`.
+    3. **Hit assignment** and candidate bookkeeping.
+    4. **Pruning** to keep only the best hypotheses.
+
+    Notes
+    -----
+    Cylindrical radius is used frequently:
+
+    .. math::
+
+        r \;=\; \sqrt{x^2 + y^2}.
     """
     
     def __init__(self, 
                  hit_pool: trk_hit_pool.HitPool,
                  brancher_cls: Type[Brancher],
                  brancher_config: Dict = None):
-        """
-        Initialize TrackBuilder.
-
-        Parameters
-        ----------
-        hit_pool : HitPool
-            Pool of available hits for assignment.
-        brancher_cls : Type[Brancher]
-            Brancher class to instantiate for EKF propagation.
-        brancher_config : Dict, optional
-            Configuration parameters for the brancher.
-        """
         self.hit_pool = hit_pool
         self.brancher_cls = brancher_cls
         self.brancher_config = brancher_config or {}
@@ -139,20 +150,30 @@ class TrackBuilder:
     def build_seeds_from_truth(self,
                               max_seeds: int = None,
                               jitter_sigma: float = 1e-4) -> pd.DataFrame:
-        """
-        Build initial seeds from truth hits.
+        r"""
+        Construct 3-point seeds from truth hits (one triplet per particle).
+
+        Procedure
+        ---------
+        1. Sort truth hits by radius :math:`r=\sqrt{x^2+y^2}`.
+        2. Deduplicate by ``(particle_id, layer_id, volume_id)`` keeping the closest in radius.
+        3. Take the first three hits per particle as seed points.
+        4. (Optionally) apply Gaussian jitter with std ``jitter_sigma``.
 
         Parameters
         ----------
         max_seeds : int, optional
-            Maximum number of unique particles to generate seeds for.
-        jitter_sigma : float
-            Std deviation of Gaussian noise applied to seed coordinates.
+            If provided, limit to the first ``max_seeds`` unique particles.
+        jitter_sigma : float, optional
+            Standard deviation for positional jitter (same units as coordinates).
+            Default is ``1e-4``.
 
         Returns
         -------
-        pd.DataFrame
-            DataFrame containing seed point coordinates and future layer info.
+        pandas.DataFrame
+            Tidy seed table containing per-seed coordinates, seed index
+            (``seed_point_index``), and derived lists like ``future_layers`` and
+            ``future_hit_ids`` for each particle.
         """
         print(f"Building seeds from {len(self.hit_pool.pt_cut_hits)} truth hits...")
         
@@ -204,24 +225,24 @@ class TrackBuilder:
                                max_tracks_per_seed: int = 30,
                                max_branches: int = 12,
                                jitter_sigma: float = 1e-3) -> List[TrackCandidate]:
-        """
-        Complete pipeline: build seeds from truth and then build tracks
-        
+        r"""
+        Full pipeline: build seeds then construct tracks from those seeds.
+
         Parameters
         ----------
         max_seeds : int, optional
-            Maximum number of seeds to build
+            Maximum number of seed particles to process.
         max_tracks_per_seed : int
-            Maximum number of track candidates per seed
+            Upper bound on concurrent hypotheses per seed inside the brancher.
         max_branches : int
-            Maximum number of branches to keep at each layer
+            Maximum number of branches kept per layer (beam width / prune size).
         jitter_sigma : float
-            Standard deviation of jitter for seed points
-            
+            Positional jitter applied at seed building time.
+
         Returns
         -------
-        List[TrackCandidate]
-            List of completed tracks
+        list of TrackCandidate
+            All completed tracks produced by the pipeline.
         """
         # Build seeds first
         seeds_df = self.build_seeds_from_truth(max_seeds, jitter_sigma)
@@ -232,22 +253,22 @@ class TrackBuilder:
     def build_tracks_from_seeds(self, seeds_df: pd.DataFrame, 
                                max_tracks_per_seed: int = 30,
                                max_branches: int = 12) -> List[TrackCandidate]:
-        """
-        Build tracks from a seeds DataFrame
-        
+        r"""
+        Build tracks by running the brancher on a seeds table.
+
         Parameters
         ----------
-        seeds_df : pd.DataFrame
-            DataFrame with seed information
+        seeds_df : pandas.DataFrame
+            Output of :meth:`build_seeds_from_truth`.
         max_tracks_per_seed : int
-            Maximum number of track candidates to maintain per seed
+            Upper bound on track hypotheses per seed used by the brancher.
         max_branches : int
-            Maximum number of branches to keep at each layer
-            
+            Beam size: number of best hypotheses retained after each expansion.
+
         Returns
         -------
-        List[TrackCandidate]
-            List of completed tracks
+        list of TrackCandidate
+            Completed tracks (status ``COMPLETED``) accumulated during building.
         """
         # Create brancher with current hit pool state
         self.brancher = self.brancher_cls(
@@ -263,17 +284,30 @@ class TrackBuilder:
         return self.completed_tracks
     
     def _process_seed_group(self, seed_group: pd.DataFrame, max_tracks: int, max_branches: int) -> None:
-        """
-        Process a group of 3 seed points for a single particle and build tracks.
+        r"""
+        Process one particle's 3-point seed and run the brancher to build tracks.
+
+        Steps
+        -----
+        1. Sort the three seed points by ``seed_point_index``.
+        2. Build the layer sequence (``future_layers``) and a corresponding time grid
+           :math:`t = \operatorname{linspace}(0, 1, L+3)`.
+        3. Run ``brancher.run(seed_xyz, layers, t)`` to obtain candidate branches.
+        4. Convert branches to :class:`TrackCandidate` and assign their hits.
+        5. Prune to at most ``max_branches`` per particle.
 
         Parameters
         ----------
-        seed_group : pd.DataFrame
-            Seed points associated with one particle.
+        seed_group : pandas.DataFrame
+            Three seed rows for a single particle (with shared ``future_layers``).
         max_tracks : int
-            Maximum number of track candidates per seed.
+            Maximum number of brancher hypotheses per seed (forwarded to brancher if relevant).
         max_branches : int
-            Maximum number of branches to retain per layer.
+            Per-particle cap when pruning resulting tracks.
+
+        Returns
+        -------
+        None
         """
         # Sort by seed_point_index to ensure correct order
         seed_group = seed_group.sort_values('seed_point_index')
@@ -311,17 +345,22 @@ class TrackBuilder:
             trk_plot.plot_branches(branches_list, seed_points, future_layers, hits_df=self.hit_pool.hits, truth_hits=self.hit_pool.pt_cut_hits, particle_id=particle_id)
     
     def _convert_branches_to_tracks(self, branches: List[Dict], particle_id: int, seed_row: pd.Series) -> None:
-        """
-        Convert EKF-generated branches to TrackCandidate objects.
+        r"""
+        Convert brancher outputs into :class:`TrackCandidate` objects and assign hits.
 
         Parameters
         ----------
-        branches : List[Dict]
-            Output of the brancher representing different track paths.
+        branches : list of dict
+            Each branch dictionary must contain
+            ``'traj'``, ``'hit_ids'``, ``'state'``, ``'cov'``, and ``'score'``.
         particle_id : int
-            Particle ID to associate the new tracks with.
-        seed_row : pd.Series
-            Seed point row from which the tracks originated.
+            Particle identifier used to index candidates.
+        seed_row : pandas.Series
+            Seed metadata for this particle; used to determine completion status.
+
+        Returns
+        -------
+        None
         """
         for branch in branches:
             track_id = self.next_track_id
@@ -354,13 +393,20 @@ class TrackBuilder:
                 self.completed_tracks.append(track)
     
     def _prune_tracks(self, max_branches: int) -> None:
-        """
-        Prune track candidates by keeping only top-scoring ones per particle.
+        r"""
+        Keep only the top-scoring candidates per particle (beam pruning).
+
+        For each particle, sort by accumulated score (lower is better) and keep
+        the first ``max_branches`` items. Releases hits from removed candidates.
 
         Parameters
         ----------
         max_branches : int
-            Maximum number of candidates to retain per particle.
+            Per-particle cap.
+
+        Returns
+        -------
+        None
         """
         # Prune each particle separately to ensure each keeps some tracks
         for particle_id, particle_tracks in self.track_candidates_by_particle.items():
@@ -387,17 +433,18 @@ class TrackBuilder:
                 del self.track_candidates_by_particle[particle_id][track_id]
     
     def get_best_tracks(self, n: int = None) -> List[TrackCandidate]:
-        """
-        Get the top N best tracks by score.
+        r"""
+        Return the top-``n`` completed tracks by ascending score.
 
         Parameters
         ----------
         n : int, optional
-            Number of top tracks to return. If None, returns all.
+            Number of tracks to return. If ``None``, return all completed tracks.
 
         Returns
         -------
-        List[TrackCandidate]
+        list of TrackCandidate
+            Sorted by increasing ``score``.
         """
         sorted_tracks = sorted(self.completed_tracks, key=lambda t: t.score)
         if n is None:
@@ -405,14 +452,23 @@ class TrackBuilder:
         return sorted_tracks[:n]
     
     def get_track_statistics(self) -> Dict:
-        """
-        Get overall statistics about the track building process.
+        r"""
+        Summarize global building statistics.
 
         Returns
         -------
-        Dict[str, object]
-            Dictionary containing summary statistics such as counts of tracks,
-            hits, seeds, and assignment ratios.
+        dict
+            Keys include:
+
+            * ``total_tracks_created`` — total IDs allocated (including pruned).
+            * ``completed_tracks`` — number with status ``COMPLETED``.
+            * ``active_tracks`` — number with status ``ACTIVE``.
+            * ``seeds_built`` — number of seed rows in ``seeds_df``.
+            * ``unique_particles`` — distinct particle IDs in seeds.
+            * ``assigned_hits`` — count of hits currently assigned in pool.
+            * ``available_hits`` — unassigned hits remaining.
+            * ``total_hits`` — size of hit table.
+            * ``assignment_ratio`` — assigned / total.
         """
         # Count active tracks across all particles
         active_tracks = 0
@@ -433,108 +489,108 @@ class TrackBuilder:
         } # 'layer_stats': self.hit_pool.get_layer_statistics()
     
     def get_seeds_dataframe(self) -> pd.DataFrame:
-        """
-        Get a copy of the current seed DataFrame.
+        r"""
+        Return a defensive copy of the current seeds table.
 
         Returns
         -------
-        pd.DataFrame
-            A copy of the internal seed DataFrame.
+        pandas.DataFrame
+            Copy of the internal ``seeds_df``.
         """
         return self.seeds_df.copy()
     
     def get_tracks_by_seed(self, particle_id: int) -> List[TrackCandidate]:
-        """
-        Get all tracks built from a specific seed.
+        r"""
+        Retrieve completed tracks derived from a given seed (by particle ID).
 
         Parameters
         ----------
         particle_id : int
-            The particle ID of the seed.
+            Seed particle identifier.
 
         Returns
         -------
-        List[TrackCandidate]
-            Tracks that originated from the given seed.
+        list of TrackCandidate
+            Completed tracks whose ``particle_id`` equals the query.
         """
         return [track for track in self.completed_tracks if track.particle_id == particle_id]
     
     def get_track_candidates_by_particle(self, particle_id: int) -> List[TrackCandidate]:
-        """
-        Get all track candidates for a specific particle ID.
+        r"""
+        Retrieve all track candidates (completed and active) for a particle.
 
         Parameters
         ----------
         particle_id : int
-            Particle ID to query.
+            Identifier to query.
 
         Returns
         -------
-        List[TrackCandidate]
-            List of track candidates.
+        list of TrackCandidate
+            All candidates currently kept for the particle.
         """
         if particle_id not in self.track_candidates_by_particle:
             return []
         return list(self.track_candidates_by_particle[particle_id].values())
     
     def get_active_track_candidates_by_particle(self, particle_id: int) -> List[TrackCandidate]:
-        """
-        Get active track candidates for a given particle ID.
+        r"""
+        Retrieve *active* candidates for a particle.
 
         Parameters
         ----------
         particle_id : int
-            Particle ID to query.
+            Identifier to query.
 
         Returns
         -------
-        List[TrackCandidate]
-            Active track candidates.
+        list of TrackCandidate
+            Candidates with status ``ACTIVE``.
         """
         candidates = self.get_track_candidates_by_particle(particle_id)
         return [track for track in candidates if track.status == TrackStatus.ACTIVE]
     
     def get_completed_track_candidates_by_particle(self, particle_id: int) -> List[TrackCandidate]:
-        """
-        Get completed track candidates for a specific particle ID.
+        r"""
+        Retrieve *completed* candidates for a particle.
 
         Parameters
         ----------
         particle_id : int
-            Particle ID to query.
+            Identifier to query.
 
         Returns
         -------
-        List[TrackCandidate]
-            Completed track candidates.
+        list of TrackCandidate
+            Candidates with status ``COMPLETED``.
         """
         candidates = self.get_track_candidates_by_particle(particle_id)
         return [track for track in candidates if track.status == TrackStatus.COMPLETED]
     
     def get_all_particle_ids(self) -> List[int]:
-        """
-        Get all particle IDs that have associated track candidates.
+        r"""
+        List all particle IDs present in the current builder state.
 
         Returns
         -------
-        List[int]
-            Particle IDs present in the current track builder state.
+        list of int
+            Keys of the per-particle candidate map.
         """
         return list(self.track_candidates_by_particle.keys())
     
     def get_track_by_id(self, track_id: int) -> Optional[TrackCandidate]:
-        """
-        Retrieve a track by its global ID.
+        r"""
+        Look up a track candidate by its global ID.
 
         Parameters
         ----------
         track_id : int
-            Global track ID.
+            Global track identifier allocated by the builder.
 
         Returns
         -------
-        Optional[TrackCandidate]
-            The track if found, otherwise None.
+        TrackCandidate or None
+            The candidate if present, otherwise ``None``.
         """
         for particle_tracks in self.track_candidates_by_particle.values():
             if track_id in particle_tracks:
@@ -542,8 +598,14 @@ class TrackBuilder:
         return None
     
     def get_particle_statistics(self, particle_id: int) -> Dict:
-        """
-        Get per-particle tracking statistics.
+        r"""
+        Per-particle candidate summary.
+
+        For the set :math:`\mathcal{T}` of candidates of a particle, we report:
+
+        * counts of ``ACTIVE`` and ``COMPLETED``
+        * best (minimum) score
+        * summary of trajectory lengths
 
         Parameters
         ----------
@@ -552,8 +614,10 @@ class TrackBuilder:
 
         Returns
         -------
-        Dict[str, object]
-            Dictionary with tracking statistics for the given particle.
+        dict
+            ``{'particle_id', 'total_candidates', 'active_candidates',
+            'completed_candidates', 'best_score', 'avg_length',
+            'min_length', 'max_length'}``
         """
         candidates = self.get_track_candidates_by_particle(particle_id)
         if not candidates:
@@ -585,13 +649,14 @@ class TrackBuilder:
         }
     
     def get_pruning_statistics(self) -> Dict:
-        """
-        Get pruning summary statistics for all particles.
+        r"""
+        Summary after pruning per particle.
 
         Returns
         -------
-        Dict[str, object]
-            Summary dictionary including tracks kept and per-particle breakdown.
+        dict
+            Includes total counts and, for each particle, the number of
+            tracks kept and simple aggregates (best score, average length).
         """
         stats = {}
         total_tracks_before = 0
@@ -613,8 +678,18 @@ class TrackBuilder:
         }
     
     def reset(self) -> None:
-        """
-        Reset the track builder state, clearing all candidates and seeds.
+        r"""
+        Clear all internal state and release all assigned hits.
+
+        Effects
+        -------
+        * Empties per-particle candidate maps and completed list.
+        * Resets seed table and next track ID counter.
+        * Calls :meth:`HitPool.reset` to mark all hits as unassigned.
+
+        Returns
+        -------
+        None
         """
         self.track_candidates_by_particle.clear()
         self.completed_tracks.clear()

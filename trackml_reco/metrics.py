@@ -4,22 +4,45 @@ from typing import Tuple, Dict
 from scipy.spatial import cKDTree
 
 def compute_metrics(xs: np.ndarray, true_points: np.ndarray, tol: float = 0.005) -> Tuple[float, float]:
-    """
-    Computes MSE and percentage of hits within a given distance tolerance.
+    r"""
+    Compute the **mean squared error (MSE)** and the **percentage of hits** within
+    a given spatial tolerance.
+
+    The MSE is defined as:
+
+    .. math::
+
+        \mathrm{MSE} = \frac{1}{N} \sum_{i=1}^{N} \left\| \mathbf{x}_i - \mathbf{\hat{x}}_i \right\|_2^2
+
+    where :math:`\mathbf{x}_i` is the predicted point and :math:`\mathbf{\hat{x}}_i` 
+    is the nearest ground-truth hit.
+
+    The **percentage recovered** is defined as:
+
+    .. math::
+
+        \%_{\mathrm{hits}} = \frac{\#\{ j : d_j \le \tau \}}{N_\text{true}} \times 100
+
+    where :math:`d_j` is the distance from a true hit to the nearest predicted hit,
+    and :math:`\tau` is the tolerance.
 
     Parameters
     ----------
-    xs : ndarray
-        Predicted trajectory points (Nx3 or more).
-    true_points : ndarray
+    xs : ndarray of shape (N, 3) or (N, M)
+        Predicted trajectory points. Only the first 3 coordinates (x, y, z) are used.
+    true_points : ndarray of shape (N_true, 3)
         Ground truth hit coordinates.
     tol : float, optional
-        Distance threshold for considering a hit correct. Default is 0.005.
+        Distance threshold :math:`\tau` (in the same units as coordinates) 
+        for a hit to be considered correctly matched. Default is 0.005.
 
     Returns
     -------
-    tuple
-        Mean squared error and percentage of matched hits.
+    tuple of float
+        ``(mse, pct_recovered)``, where:
+
+        * ``mse`` — mean squared error in coordinate units.
+        * ``pct_recovered`` — percentage of true hits within tolerance.
     """
     true_tree = cKDTree(true_points)
     d_pred, _ = true_tree.query(xs[:, :3])
@@ -30,20 +53,32 @@ def compute_metrics(xs: np.ndarray, true_points: np.ndarray, tol: float = 0.005)
     return mse, pct_recovered
 
 def branch_mse(branch: Dict, true_xyz: np.ndarray) -> float:
-    """
-    Computes mean squared error between a branch and true hit positions.
+    r"""
+    Compute the **mean squared error (MSE)** between a reconstructed branch
+    trajectory and the ground-truth hit positions.
+
+    The MSE is:
+
+    .. math::
+
+        \mathrm{MSE} = \frac{1}{N} \sum_{i=1}^{N} \min_{j} \left\| \mathbf{t}_i - \mathbf{g}_j \right\|_2^2
+
+    where:
+      * :math:`\mathbf{t}_i` is the i-th point on the branch trajectory.
+      * :math:`\mathbf{g}_j` is a ground-truth hit.
 
     Parameters
     ----------
     branch : dict
-        A branch dictionary containing 'traj' key.
-    true_xyz : ndarray
+        A branch dictionary containing a key ``'traj'`` with the predicted
+        3D trajectory points.
+    true_xyz : ndarray of shape (N_true, 3)
         Ground truth hit coordinates.
 
     Returns
     -------
     float
-        Mean squared distance between branch trajectory and true hits.
+        Mean squared distance from each branch point to the nearest true hit.
     """
     tree=cKDTree(true_xyz)
     traj=np.array(branch['traj'])
@@ -51,22 +86,34 @@ def branch_mse(branch: Dict, true_xyz: np.ndarray) -> float:
     return np.mean(d2)
 
 def branch_hit_stats(branch: Dict, true_xyz: np.ndarray, threshold: float = 1.0) -> Tuple[float, int]:
-    """
-    Computes hit recall statistics for a single branch.
+    r"""
+    Compute **hit recall statistics** for a reconstructed branch.
+
+    Recall is computed as the fraction of ground-truth hits within
+    a maximum distance threshold :math:`\delta` from any predicted point:
+
+    .. math::
+
+        \mathrm{Recall}(\%) = \frac{\#\{ j : \min_i \| \mathbf{g}_j - \mathbf{t}_i \|_2 < \delta \}}{N_\text{true}} \times 100
 
     Parameters
     ----------
     branch : dict
-        A branch dictionary containing 'traj' key.
-    true_xyz : ndarray
+        A branch dictionary containing a key ``'traj'`` with predicted
+        3D trajectory points.
+    true_xyz : ndarray of shape (N_true, 3)
         Ground truth hit coordinates.
     threshold : float, optional
-        Maximum distance for a hit to be considered matched. Default is 1.0.
+        Maximum allowable distance :math:`\delta` for a hit to be considered matched.
+        Default is 1.0.
 
     Returns
     -------
     tuple
-        Percentage of true hits matched and number of missed hits.
+        ``(pct_matched, missed)``, where:
+
+        * ``pct_matched`` — percentage of true hits matched within the threshold.
+        * ``missed`` — number of true hits not matched.
     """
     traj=np.array(branch['traj'][3:])
     true_points=np.array(true_xyz)

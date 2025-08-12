@@ -4,31 +4,39 @@ import pandas as pd
 from scipy.spatial import cKDTree
 
 class HitPool:
-    """
-    Manages the pool of available hits for track building.
+    r"""
+    Manage the pool of detector hits for track building, including fast spatial
+    lookup via per-layer KD-trees and book-keeping of assigned/unassigned hits.
 
     Attributes
     ----------
     hits : pd.DataFrame
-        DataFrame containing all hit information.
+        All hits with columns such as ``['hit_id', 'x', 'y', 'z', 'volume_id', 'layer_id', ...]``.
     pt_cut_hits : pd.DataFrame
-        Subset of hits that pass the pt-cut threshold.
+        Subset of hits that pass a transverse-momentum selection (for downstream use).
     _assigned_hits : Set[int]
-        Set of hit IDs that have been assigned to tracks.
+        Set of hit IDs currently reserved/assigned to tracks.
     _trees : Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]]
-        Spatial trees for fast hit lookup per detector layer.
+        Spatial indexes per layer; each value is ``(tree, points, hit_ids)`` where
+        ``points`` has shape ``(N, 3)`` and ``hit_ids`` has shape ``(N,)``.
+
+    Notes
+    -----
+    * Layer keys are tuples ``(volume_id, layer_id)``.
+    * Nearest-neighbor queries are performed in Euclidean 3D space.
     """
     
     def __init__(self, hits: pd.DataFrame, pt_cut_hits: pd.DataFrame):
-        """
-        Initialize hit pool with all hits and build spatial KD-trees.
+        r"""
+        Initialize the hit pool and build per-layer KD-trees.
 
         Parameters
         ----------
         hits : pd.DataFrame
-            DataFrame containing all hits with columns ['hit_id', 'x', 'y', 'z', ...].
+            Full hit table. Must include at least:
+            ``'hit_id', 'x', 'y', 'z', 'volume_id', 'layer_id'``.
         pt_cut_hits : pd.DataFrame
-            DataFrame of hits that pass a pt-cut threshold.
+            Hits that pass a :math:`p_T` selection (kept for convenience).
         """
         self.hits = hits
         self.pt_cut_hits = pt_cut_hits
@@ -37,37 +45,42 @@ class HitPool:
         
     @property
     def trees(self) -> Dict:
-        """
-        Get the spatial KD-trees for fast hit lookup.
+        r"""
+        KD-trees for fast spatial lookup, keyed by layer.
 
         Returns
         -------
-        Dict
-            Dictionary of KD-trees keyed by (volume_id, layer_id).
+        dict
+            ``{(volume_id, layer_id): (cKDTree, points, hit_ids)}``.
         """
         return self._trees
     
     @property
     def layers(self) -> List[Tuple[int, int]]:
-        """
-        Get the sorted list of detector layer keys.
+        r"""
+        Sorted list of detector layer keys.
 
         Returns
         -------
-        List[Tuple[int, int]]
-            Sorted list of (volume_id, layer_id) tuples.
+        list of tuple(int, int)
+            Sorted ``(volume_id, layer_id)`` pairs, ascending in both fields.
         """
         return sorted(self._trees.keys(), key=lambda x: (x[0], x[1]))
         
     
     def build_layer_trees(self) -> Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]]:
-        """
-        Builds KD-trees for each detector layer to enable fast hit lookup.
+        r"""
+        Build a KD-tree per detector layer for fast nearest-neighbor queries.
 
         Returns
         -------
-        Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]]
-            Dictionary mapping layer keys to KD-tree tuples (tree, points, hit_ids)
+        dict
+            Maps layer key ``(volume_id, layer_id)`` → ``(tree, points, hit_ids)`` where
+            ``points`` is ``(N, 3)`` and ``hit_ids`` is ``(N,)``.
+
+        Notes
+        -----
+        Each tree is built over the coordinates :math:`(x, y, z)`.
         """
         self.hits['layer_key'] = list(zip(self.hits.volume_id, self.hits.layer_id))
         trees = {}
@@ -82,22 +95,29 @@ class HitPool:
     def get_candidates(self, predicted_position: np.ndarray, 
                       layer: Tuple[int, int], 
                       max_candidates: int = 10) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Get candidate hits for a given layer and predicted position
-        
+        r"""
+        Return nearest unassigned hit candidates in a given layer.
+
         Parameters
         ----------
-        predicted_position : np.ndarray
-            3D predicted position
-        layer : Tuple[int, int]
-            (volume_id, layer_id) tuple
-        max_candidates : int
-            Maximum number of candidates to return
-            
+        predicted_position : ndarray, shape (3,)
+            Predicted Cartesian position :math:`\hat{x} = (x,y,z)`.
+        layer : tuple(int, int)
+            Layer key ``(volume_id, layer_id)`` to search within.
+        max_candidates : int, optional
+            Maximum number of nearest neighbors to retrieve. Default ``10``.
+
         Returns
         -------
-        Tuple[np.ndarray, np.ndarray]
-            (candidate_positions, candidate_hit_ids) where hit_ids are filtered to unassigned hits
+        candidate_positions : ndarray, shape (M, 3)
+            Candidate hit positions (unassigned only), with :math:`M \le \text{max\_candidates}`.
+        candidate_hit_ids : ndarray, shape (M,)
+            Corresponding hit IDs (unassigned only).
+
+        Notes
+        -----
+        Nearest neighbors are computed in Euclidean 3D distance relative to
+        ``predicted_position``; already-assigned hits are filtered out.
         """
         if layer not in self.trees:
             return np.array([]), np.array([])
@@ -118,18 +138,18 @@ class HitPool:
         return points[unassigned_indices], hit_ids[unassigned_indices]
     
     def assign_hit(self, hit_id: int) -> bool:
-        """
-        Mark a hit as assigned to a track
-        
+        r"""
+        Mark a hit as assigned.
+
         Parameters
         ----------
         hit_id : int
-            The hit ID to assign
-            
+            Unique hit identifier to reserve.
+
         Returns
         -------
         bool
-            True if hit was successfully assigned, False if already assigned
+            ``True`` if the hit was newly assigned; ``False`` if it was already assigned.
         """
         if hit_id in self._assigned_hits:
             return False
@@ -137,18 +157,18 @@ class HitPool:
         return True
     
     def assign_hits(self, hit_ids: List[int]) -> int:
-        """
-        Assign multiple hits at once
-        
+        r"""
+        Assign multiple hits at once.
+
         Parameters
         ----------
-        hit_ids : List[int]
-            List of hit IDs to assign
-            
+        hit_ids : list of int
+            Hit identifiers to reserve.
+
         Returns
         -------
         int
-            Number of hits successfully assigned
+            Number of hits successfully assigned (i.e., not previously assigned).
         """
         assigned_count = 0
         for hit_id in hit_ids:
@@ -157,18 +177,18 @@ class HitPool:
         return assigned_count
     
     def release_hit(self, hit_id: int) -> bool:
-        """
-        Release a hit back to the pool
-        
+        r"""
+        Release a previously assigned hit back to the pool.
+
         Parameters
         ----------
         hit_id : int
-            The hit ID to release
-            
+            Hit identifier to release.
+
         Returns
         -------
         bool
-            True if hit was successfully released, False if not assigned
+            ``True`` if the hit was released; ``False`` if it was not assigned.
         """
         if hit_id in self._assigned_hits:
             self._assigned_hits.remove(hit_id)
@@ -176,18 +196,18 @@ class HitPool:
         return False
     
     def release_hits(self, hit_ids: List[int]) -> int:
-        """
-        Release multiple hits back to the pool
-        
+        r"""
+        Release multiple hits back to the pool.
+
         Parameters
         ----------
-        hit_ids : List[int]
-            List of hit IDs to release
-            
+        hit_ids : list of int
+            Hit identifiers to release.
+
         Returns
         -------
         int
-            Number of hits successfully released
+            Number of hits successfully released.
         """
         released_count = 0
         for hit_id in hit_ids:
@@ -196,51 +216,68 @@ class HitPool:
         return released_count
     
     def is_hit_available(self, hit_id: int) -> bool:
-        """
-        Check if a hit is still available for assignment.
+        r"""
+        Check if a hit is currently unassigned (available).
 
         Parameters
         ----------
         hit_id : int
-            The hit ID to check.
+            Hit identifier to query.
 
         Returns
         -------
         bool
-            True if the hit is available, False if already assigned.
+            ``True`` if unassigned, ``False`` otherwise.
         """
         return hit_id not in self._assigned_hits
     
     def get_available_hit_count(self) -> int:
-        """
-        Get the count of remaining unassigned hits.
+        r"""
+        Number of unassigned hits remaining.
 
         Returns
         -------
         int
-            Number of unassigned hits.
+            Count of available (not assigned) hits.
         """
         return len(self.hits) - len(self._assigned_hits)
     
     def get_assignment_ratio(self) -> float:
-        """
-        Get the ratio of assigned hits to total hits.
+        r"""
+        Fraction of assigned hits.
 
         Returns
         -------
         float
-            Assignment ratio in the range [0, 1].
+            Ratio :math:`\rho \in [0,1]` defined as
+
+            .. math::
+
+               \rho = \frac{\lvert \mathcal{H}_{\text{assigned}} \rvert}
+                           {\lvert \mathcal{H}_{\text{total}} \rvert},
+
+            with the convention :math:`\rho=0` if there are no hits.
         """
         return len(self._assigned_hits) / len(self.hits) if len(self.hits) > 0 else 0.0
     
     def get_layer_statistics(self) -> Dict[Tuple[int, int], Dict]:
-        """
-        Get statistics about hit assignment per layer.
+        r"""
+        Per-layer assignment statistics.
 
         Returns
         -------
-        Dict[Tuple[int, int], Dict]
-            Per-layer statistics: total, assigned, available hits, and assignment ratio.
+        dict
+            For each layer key ``(volume_id, layer_id)``, a dictionary with:
+
+            * ``'total_hits'`` : int
+            * ``'assigned_hits'`` : int
+            * ``'available_hits'`` : int
+            * ``'assignment_ratio'`` : float in :math:`[0,1]`.
+
+        Notes
+        -----
+        Ratios are computed as :math:`\text{assigned} / \text{total}` per layer,
+        with 0 if the layer has no hits.
         """
         stats = {}
         for layer, (tree, points, hit_ids) in self.trees.items():
@@ -255,8 +292,8 @@ class HitPool:
         return stats
     
     def reset(self) -> None:
-        """
-        Reset the hit pool, releasing all assigned hits.
+        r"""
+        Release all assigned hits (clear reservations).
 
         Returns
         -------
@@ -265,18 +302,19 @@ class HitPool:
         self._assigned_hits.clear()
     
     def get_unassigned_hits_in_layer(self, layer: Tuple[int, int]) -> List[int]:
-        """
-        Get all unassigned hit IDs in a specific layer
-        
+        r"""
+        List all **unassigned** hit IDs in a given layer.
+
         Parameters
         ----------
-        layer : Tuple[int, int]
-            (volume_id, layer_id) tuple
-            
+        layer : tuple(int, int)
+            Layer key ``(volume_id, layer_id)``.
+
         Returns
         -------
-        List[int]
-            List of unassigned hit IDs in the layer
+        list of int
+            Unassigned hit IDs in the specified layer. Empty list if the layer
+            is unknown or fully assigned.
         """
         if layer not in self.trees:
             return []
@@ -285,18 +323,19 @@ class HitPool:
         return [hid for hid in hit_ids if hid not in self._assigned_hits]
     
     def get_assigned_hits_in_layer(self, layer: Tuple[int, int]) -> List[int]:
-        """
-        Get all assigned hit IDs in a specific layer
-        
+        r"""
+        List all **assigned** hit IDs in a given layer.
+
         Parameters
         ----------
-        layer : Tuple[int, int]
-            (volume_id, layer_id) tuple
-            
+        layer : tuple(int, int)
+            Layer key ``(volume_id, layer_id)``.
+
         Returns
         -------
-        List[int]
-            List of assigned hit IDs in the layer
+        list of int
+            Assigned hit IDs in the specified layer. Empty list if the layer
+            is unknown or has no assignments.
         """
         if layer not in self.trees:
             return []

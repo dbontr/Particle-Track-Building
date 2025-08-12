@@ -4,19 +4,151 @@ import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 from matplotlib import cm
 from matplotlib.colors import Normalize
-from typing import *
+from typing import Tuple, Dict, List, Optional
+import logging
+
+def plot_extras(hits: pd.DataFrame, pt_cut_hits: pd.DataFrame, enabled: bool) -> None:
+    r"""
+    Optionally generate presentation‐style plots of detector geometry and truth trajectories.
+
+    This function can plot:
+
+    1. All hits colored by layer in :math:`(z, r)` and 3D.
+    2. Detector layer boundaries in :math:`(z, r)` space.
+    3. Ground‐truth particle paths in :math:`(z, r)` and 3D.
+
+    Parameters
+    ----------
+    hits : pandas.DataFrame
+        All reconstructed hits with columns ``['x', 'y', 'z', 'volume_id', 'layer_id']``.
+    pt_cut_hits : pandas.DataFrame
+        Ground‐truth hits passing :math:`p_T` selection cuts.
+    enabled : bool
+        If ``False``, the function returns immediately without plotting.
+
+    Returns
+    -------
+    None
+    """
+    if not enabled:
+        return
+    logging.info("Plotting detector and truth (extra plots)...")
+    layer_tuples = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x: (x[0], x[1]))
+    plot_hits_colored_by_layer(hits, layer_tuples)
+    plot_layer_boundaries(hits, layer_tuples)
+    plot_truth_paths_rz(pt_cut_hits, max_tracks=None)
+    plot_truth_paths_3d(pt_cut_hits, max_tracks=None)
+
+def plot_seeds(track_builder, show: bool, max_seeds: Optional[int]) -> None:
+    r"""
+    Plot reconstructed seed trajectories in both :math:`(z, r)` and 3D space.
+
+    The cylindrical radius is computed as:
+
+    .. math::
+
+        r = \sqrt{x^2 + y^2}
+
+    Only seeds with at least three points are plotted.
+
+    Parameters
+    ----------
+    track_builder : object
+        Track builder instance with a ``get_seeds_dataframe()`` method.
+    show : bool
+        If ``False``, plotting is skipped.
+    max_seeds : int, optional
+        Maximum number of seeds to plot. If ``None``, all seeds are shown.
+
+    Returns
+    -------
+    None
+    """
+    if not show:
+        return
+
+    seeds_df = track_builder.get_seeds_dataframe()
+    if seeds_df.empty:
+        logging.info("No seeds to plot.")
+        return
+
+    # build a tidy DataFrame of (x,y,z,r) sequences per particle with >=3 points
+    plot_rows: List[dict] = []
+    for _, group in seeds_df.groupby("particle_id"):
+        if len(group) < 3:
+            continue
+        g = group.sort_values("seed_point_index")
+        xs, ys, zs = g["x"].to_numpy(), g["y"].to_numpy(), g["z"].to_numpy()
+        rs = np.sqrt(xs**2 + ys**2)
+        for x, y, z, r in zip(xs, ys, zs, rs):
+            plot_rows.append({"particle_id": int(g["particle_id"].iloc[0]), "x": x, "y": y, "z": z, "r": r})
+
+    if not plot_rows:
+        logging.info("No seed groups with >=3 points to plot.")
+        return
+
+    plot_df = pd.DataFrame(plot_rows)
+    plot_seed_paths_rz(plot_df, max_seeds=max_seeds)
+    plot_seed_paths_3d(plot_df, max_seeds=max_seeds)
+
+def plot_best_track_3d(track_builder, track, truth_particle: pd.DataFrame, idx: int) -> None:
+    r"""
+    Visualize a single reconstructed track compared to its ground truth in 3D.
+
+    Parameters
+    ----------
+    track_builder : object
+        Object with a ``hit_pool`` attribute containing all hits.
+    track : object
+        Track object with a ``trajectory`` attribute (array of shape :math:`(N, 3)`).
+    truth_particle : pandas.DataFrame
+        Truth hits for the particle, with columns ``['x', 'y', 'z', 'r']``.
+    idx : int
+        Index or label for the reconstructed track.
+
+    Returns
+    -------
+    None
+    """
+    fig = plt.figure(figsize=(6, 6))
+    ax = fig.add_subplot(111, projection="3d")
+
+    hits = track_builder.hit_pool.hits
+    ax.scatter(hits.x, hits.y, hits.z, s=1, alpha=0.08)
+
+    tp = truth_particle.sort_values("r")
+    ax.plot(tp.x, tp.y, tp.z, "--", label="truth")
+
+    traj = np.asarray(track.trajectory)
+    ax.plot(traj[:, 0], traj[:, 1], traj[:, 2], "-", label="reconstructed")
+
+    ax.set_title(f"Track {idx} (PID {track.particle_id})")
+    ax.legend()
+    plt.show()
 
 def check_seed_and_plot(model: object, seed_points: List[np.ndarray]) -> None:
-    """
-    Estimates a seed state from 3 seed points, compares it with geometric expectations,
-    and visualizes the position and velocity vs. true circle tangent in 2D.
+    r"""
+    Estimate and validate a seed state from three points, then visualize its velocity vs. the true circle tangent.
+
+    Given three seed points :math:`P_1, P_2, P_3` in the transverse plane,
+    the true circle center :math:`(c_x, c_y)` is computed via perpendicular bisector equations.
+    The true tangent vector is orthogonal to the radial vector from center to :math:`P_3`.
+
+    The seed's velocity vector :math:`\hat{v}` from the model estimate is compared to this
+    true tangent via:
+
+    .. math::
+
+        \theta = \cos^{-1}(\hat{v} \cdot \hat{t})
+
+    where :math:`\theta` is the angle difference in degrees.
 
     Parameters
     ----------
     model : object
-        An object with an `estimate_seed` method that takes a list of 3D points and returns a tuple of initial state and covariance.
-    seed_points : List[np.ndarray]
-        A list of 3 seed points (each a 3-element array-like object representing x, y, z).
+        Must have a ``estimate_seed(points)`` method returning ``(x0, P0)``.
+    seed_points : list of ndarray
+        Three seed points, each a length‐3 array :math:`(x, y, z)`.
 
     Returns
     -------
@@ -63,15 +195,19 @@ def check_seed_and_plot(model: object, seed_points: List[np.ndarray]) -> None:
 
 
 def plot_hits_colored_by_layer(hits_df: pd.DataFrame, layer_tuples: List[Tuple[int, int]]) -> None:
-    """
-    Plots a 2D z–r and 3D xyz scatter plot of hits, colored by (volume_id, layer_id).
+    r"""
+    Plot detector hits colored by their :math:`(\text{volume\_id}, \text{layer\_id})` in both :math:`(z, r)` and 3D.
 
     Parameters
     ----------
-    hits_df : pd.DataFrame
-        DataFrame with columns ['x', 'y', 'z', 'volume_id', 'layer_id'].
-    layer_tuples : List[Tuple[int, int]]
-        Ordered list of (volume_id, layer_id) combinations to assign color labels.
+    hits_df : pandas.DataFrame
+        Must contain columns ``['x', 'y', 'z', 'volume_id', 'layer_id']``.
+    layer_tuples : list of tuple
+        Unique :math:`(\text{volume\_id}, \text{layer\_id})` pairs in desired color order.
+
+    Notes
+    -----
+    The cylindrical radius is computed as :math:`r = \sqrt{x^2 + y^2}`.
 
     Returns
     -------
@@ -125,15 +261,15 @@ def plot_hits_colored_by_layer(hits_df: pd.DataFrame, layer_tuples: List[Tuple[i
 
 
 def plot_truth_paths_rz(truth_hits_df: pd.DataFrame, max_tracks: Optional[int] = None) -> None:
-    """
-    Plots the ground truth particle paths in 2D (z vs r).
+    r"""
+    Plot ground‐truth particle trajectories in the :math:`(z, r)` plane.
 
     Parameters
     ----------
-    truth_hits_df : pd.DataFrame
-        DataFrame with 'x', 'y', 'z', and 'particle_id' columns.
-    max_tracks : Optional[int], default=None
-        Maximum number of tracks to plot. If None, plots all.
+    truth_hits_df : pandas.DataFrame
+        Columns: ``['x', 'y', 'z', 'particle_id']``.
+    max_tracks : int, optional
+        Limit number of tracks plotted. If ``None``, all are shown.
 
     Returns
     -------
@@ -155,15 +291,15 @@ def plot_truth_paths_rz(truth_hits_df: pd.DataFrame, max_tracks: Optional[int] =
 
 
 def plot_truth_paths_3d(truth_hits_df: pd.DataFrame, max_tracks: Optional[int] = None) -> None:
-    """
-    Plots the ground truth particle paths in 3D (x, y, z).
+    r"""
+    Plot ground‐truth particle trajectories in 3D Cartesian space.
 
     Parameters
     ----------
-    truth_hits_df : pd.DataFrame
-        DataFrame with 'x', 'y', 'z', and 'particle_id' columns.
-    max_tracks : Optional[int], default=None
-        Maximum number of tracks to plot. If None, plots all.
+    truth_hits_df : pandas.DataFrame
+        Columns: ``['x', 'y', 'z', 'particle_id']``.
+    max_tracks : int, optional
+        Limit number of tracks plotted. If ``None``, all are shown.
 
     Returns
     -------
@@ -184,15 +320,15 @@ def plot_truth_paths_3d(truth_hits_df: pd.DataFrame, max_tracks: Optional[int] =
     plt.show()
 
 def plot_seed_paths_rz(seeds_df: pd.DataFrame, max_seeds: Optional[int] = None) -> None:
-    """
-    Plots seed trajectories in 2D (z vs r) for visual inspection.
+    r"""
+    Plot seed trajectories in :math:`(z, r)` for visual inspection.
 
     Parameters
     ----------
-    seeds_df : pd.DataFrame
-        DataFrame with 'x', 'y', 'z', and 'particle_id' columns.
-    max_seeds : Optional[int], default=None
-        Maximum number of seed tracks to plot. If None, plots all.
+    seeds_df : pandas.DataFrame
+        Columns: ``['x', 'y', 'z', 'particle_id']``. Will compute :math:`r` if missing.
+    max_seeds : int, optional
+        Limit number of seeds plotted. If ``None``, all are shown.
 
     Returns
     -------
@@ -216,15 +352,15 @@ def plot_seed_paths_rz(seeds_df: pd.DataFrame, max_seeds: Optional[int] = None) 
 
 
 def plot_seed_paths_3d(seeds_df: pd.DataFrame, max_seeds: Optional[int] = None) -> None:
-    """
-    Plots seed trajectories in 3D (x, y, z) space.
+    r"""
+    Plot seed trajectories in 3D Cartesian space.
 
     Parameters
     ----------
-    seeds_df : pd.DataFrame
-        DataFrame with 'x', 'y', 'z', and 'particle_id' columns.
-    max_seeds : Optional[int], default=None
-        Maximum number of seed tracks to plot. If None, plots all.
+    seeds_df : pandas.DataFrame
+        Columns: ``['x', 'y', 'z', 'particle_id']``.
+    max_seeds : int, optional
+        Limit number of seeds plotted. If ``None``, all are shown.
 
     Returns
     -------
@@ -245,17 +381,17 @@ def plot_seed_paths_3d(seeds_df: pd.DataFrame, max_seeds: Optional[int] = None) 
     plt.show()
 
 def plot_layer_boundaries(hits_df: pd.DataFrame, layer_tuples: List[Tuple[int, int]], pad_frac: float = 0.05) -> None:
-    """
-    Draws rectangular boundaries for each detector layer in (z, r) space.
+    r"""
+    Draw rectangular boundaries in :math:`(z, r)` for each detector layer.
 
     Parameters
     ----------
-    hits_df : pd.DataFrame
-        DataFrame with columns ['x', 'y', 'z', 'volume_id', 'layer_id'].
-    layer_tuples : List[Tuple[int, int]]
-        List of (volume_id, layer_id) tuples representing layers to draw.
+    hits_df : pandas.DataFrame
+        Columns: ``['x', 'y', 'z', 'volume_id', 'layer_id']``.
+    layer_tuples : list of tuple
+        :math:`(\text{volume\_id}, \text{layer\_id})` pairs to draw.
     pad_frac : float, default=0.05
-        Fractional padding around the global z and r ranges for better visualization.
+        Fraction of global :math:`z` and :math:`r` ranges to add as padding.
 
     Returns
     -------
@@ -319,30 +455,32 @@ def plot_layer_boundaries(hits_df: pd.DataFrame, layer_tuples: List[Tuple[int, i
     
 def plot_branches(branches: List[Dict], seed_points: List[np.ndarray], future_layers: List[Tuple[int, int]], hits_df: pd.DataFrame, 
                   truth_hits: Optional[pd.DataFrame] = None, particle_id: Optional[int] = None, pad_frac: float = 0.05) -> None:
-    """
-    Draw layer‐boundaries in (z, r) and overlay track‐building branches,
-    seed points, and truth hits.
+    r"""
+    Overlay track‐building branches, seed points, and truth hits on detector layer boundaries.
+
+    The :math:`(z, r)` view is used, with rectangular outlines for each layer and
+    trajectories plotted as connected points.
 
     Parameters
     ----------
-    branches : List[Dict]
-        Each dict must have a `.trajectory` attribute or key containing
-        an Nx3 array or list of (x,y,z).
-    seed_points : List[np.ndarray]
-        List of 3‑element arrays [x,y,z] for the seed.
-    future_layers : List[Tuple[int, int]]
-        Not used directly here but kept for API compatibility.
-    hits_df : pd.DataFrame
-        Must contain columns ['x','y','z','volume_id','layer_id'].
-    layer_tuples : List[Tuple[int, int]]
-        (volume_id, layer_id) pairs for which to draw rectangles.
-    truth_hits : pd.DataFrame, optional
-        Must contain ['x','y','z','particle_id'] if provided.
+    branches : list of dict
+        Each must have a ``trajectory`` attribute or key with :math:`(N, 3)` coordinates.
+    seed_points : list of ndarray
+        List of 3D :math:`[x, y, z]` arrays for the seed.
+    future_layers : list of tuple
+        Layer identifiers reserved for API compatibility.
+    hits_df : pandas.DataFrame
+        Hit coordinates and layer IDs.
+    truth_hits : pandas.DataFrame, optional
+        If provided, must include ``particle_id`` to plot truth hits.
     particle_id : int, optional
-        If truth_hits is given, filters for this particle. If None,
-        uses the first unique ID found.
+        Filter truth hits by this particle ID. Defaults to first present.
     pad_frac : float
-        Fractional padding around global z and r ranges.
+        Padding fraction for :math:`z` and :math:`r` axes.
+
+    Returns
+    -------
+    None
     """
     layer_tuples = sorted(set(zip(hits_df.volume_id, hits_df.layer_id)), key=lambda x:(x[0],x[1]))
     # Compute global z/r extents for padding
@@ -441,19 +579,29 @@ def plot_branches(branches: List[Dict], seed_points: List[np.ndarray], future_la
 
 def plot_track_building_debug(track_builder, seed_row: pd.Series, branches: List[Dict], 
                             max_branches_to_plot: int = 10) -> None:
-    """
-    Helper function to plot track building debug information for a specific seed.
-    
+    r"""
+    Plot debug view of track‐building results for a single seed.
+
+    Steps
+    -----
+    1. Extract the first 3 hits as the seed points.
+    2. Limit plotted branches to ``max_branches_to_plot``.
+    3. Call :func:`plot_branches` with truth hits overlay.
+
     Parameters
     ----------
-    track_builder : TrackBuilder
-        The track builder instance containing hit_pool and other data.
-    seed_row : pd.Series
-        A seed row from the seeds DataFrame.
-    branches : List[Dict]
-        List of branch dictionaries from track building.
+    track_builder : object
+        Must have ``hit_pool`` with ``pt_cut_hits`` and ``hits`` attributes.
+    seed_row : pandas.Series
+        Row from the seeds DataFrame.
+    branches : list of dict
+        Branch trajectories from track building.
     max_branches_to_plot : int, default=10
-        Maximum number of branches to plot to avoid clutter.
+        Limit number of branches plotted.
+
+    Returns
+    -------
+    None
     """
     # Extract seed points from the seed row
     particle_id = seed_row['particle_id']

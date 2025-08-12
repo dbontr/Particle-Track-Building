@@ -2,14 +2,16 @@ __all__ = [
     "load_and_preprocess",
     "build_layer_trees",
     "random_solution", "drop_hits", "shuffle_hits", "jitter_seed_points",
-    "Brancher", "HelixEKFBrancher", "HelixEKFAStarBrancher", "HelixEKFACOBrancher",
-    "HelixEKFPSOBrancher", "HelixEKFSABrancher", "HelixEKFGABrancher",
-    "HelixEKFHungarianBrancher",
-    "compute_metrics", "branch_mse", "branch_hit_stats",
-    "plot_hits_colored_by_layer", "plot_layer_boundaries",
+    "Brancher", "HelixEKFBrancher", "HelixEKFAStarBrancher", 
+    "HelixEKFACOBrancher", "HelixEKFPSOBrancher", "HelixEKFSABrancher", 
+    "HelixEKFGABrancher", "HelixEKFHungarianBrancher",
+    "compute_metrics", "branch_mse", "branch_hit_stats", 
+    "plot_extras", "plot_seeds", "plot_best_track_3d",
+    "check_seed_and_plot", "plot_hits_colored_by_layer", 
+    "plot_layer_boundaries", "plot_track_building_debug",
     "plot_truth_paths_rz", "plot_truth_paths_3d",
     "plot_seed_paths_rz", "plot_seed_paths_3d",
-    "_make_submission", 
+    "plot_branches", "_make_submission", 
 ]
 
 # Data & preprocessing
@@ -27,7 +29,7 @@ from .utils import (
     jitter_seed_points
 )
 
-# Tracker
+# Branchers
 from .branchers.brancher import Brancher
 from .branchers.ekf import HelixEKFBrancher
 from .branchers.astar import HelixEKFAStarBrancher
@@ -42,10 +44,16 @@ from .metrics import compute_metrics, branch_mse, branch_hit_stats
 
 # Plotting
 from .plotting import (
+    plot_extras,
+    plot_seeds,
+    plot_best_track_3d,
+    check_seed_and_plot,
     plot_hits_colored_by_layer,
     plot_layer_boundaries,
     plot_truth_paths_rz,
     plot_truth_paths_3d,
     plot_seed_paths_rz,
     plot_seed_paths_3d,
+    plot_branches,
+    plot_track_building_debug,
 )
