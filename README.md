@@ -21,7 +21,61 @@ z' &= z + s\tan\lambda ,
 $$
 
 while the EKF prediction–update cycle transports the state and covariance.
-Measurements $\mathbf{z}=h(\mathbf{x})+\mathbf{w}$ with innovation $r=\mathbf{z}-h(\mathbf{x}_{k|k-1})$ are gated using $S = H P H^T + R$ and the test statistic $\chi^2 = r^\top S^{-1} r$ [9,19,21]. Starting from three-hit seeds, the framework explores candidate assignments with algorithms ranging from the baseline EKF to A*, Ant Colony Optimization, Genetic Algorithms, Particle Swarm Optimization, Simulated Annealing, and layer-wise Hungarian matching [22].
+Linearising the motion and measurement models introduces the Jacobians
+$F=\partial f/\partial\mathbf{x}$ and $H=\partial h/\partial\mathbf{x}$.
+For the helical propagation above one obtains, to first order in $s$,
+
+$$
+F =
+\begin{pmatrix}
+1 & 0 & 0 & R(\cos\phi' - \cos\phi) & 0 & -Bs\frac{q}{p_T^2} \\
+0 & 1 & 0 & R(\sin\phi' - \sin\phi) & 0 & 0 \\
+0 & 0 & 1 & 0 & s & 0 \\
+0 & 0 & 0 & 1 & 0 & -Bs\frac{q}{p_T^2} \\
+0 & 0 & 0 & 0 & 1 & 0 \\
+0 & 0 & 0 & 0 & 0 & 1
+\end{pmatrix},
+$$
+
+while planar sensor modules measuring Cartesian positions employ
+
+$$
+h(\mathbf{x}) =
+\begin{pmatrix}x \\ y \\ z\end{pmatrix}, \qquad
+H =
+\begin{pmatrix}
+1 & 0 & 0 & 0 & 0 & 0 \\
+0 & 1 & 0 & 0 & 0 & 0 \\
+0 & 0 & 1 & 0 & 0 & 0
+\end{pmatrix}.
+$$
+
+Stochastic effects from multiple scattering and energy loss are encoded in
+the process noise $Q$. Using the Highland expression [25] for the RMS
+scattering angle $\theta_0 = 13.6\,\text{MeV}/(p\beta)\,\sqrt{x/X_0}\,[1+0.038\ln(x/X_0)]$, the angular covariances are
+approximated as $Q_{\phi\phi} = Q_{\lambda\lambda} = \theta_0^2$ with
+remaining elements filled via kinematic relations [3,20]. The prediction and
+update equations become
+
+$$
+\begin{aligned}
+\mathbf{x}_{k|k-1} &= f(\mathbf{x}_{k-1}), & P_{k|k-1} &= F P_{k-1} F^\top + Q,\\
+r_k &= \mathbf{z}_k - h(\mathbf{x}_{k|k-1}), & S_k &= H P_{k|k-1} H^\top + R,\\
+K_k &= P_{k|k-1} H^\top S_k^{-1}, & \mathbf{x}_k &= \mathbf{x}_{k|k-1} + K_k r_k,\\
+&& P_k &= (I - K_k H) P_{k|k-1}.
+\end{aligned}
+$$
+
+Branches are retained only if the gating test
+$\chi^2 = r_k^\top S_k^{-1} r_k < \chi^2_{\max}$ passes [9,19,21]. For
+Cartesian sensors the innovation has three degrees of freedom, so
+$\chi^2_{\max}$ corresponds to an ellipsoidal gate enclosing the desired
+global $p$-value. This statistical pruning reduces combinatorics while
+preserving hits consistent with the predicted trajectory.
+Starting from three-hit seeds, the framework explores candidate assignments
+with algorithms ranging from the baseline EKF to A*, Ant Colony Optimization,
+Genetic Algorithms, Particle Swarm Optimization, Simulated Annealing, and
+layer-wise Hungarian matching [22].
 
 ## Brancher Algorithms
 
@@ -92,6 +146,33 @@ $$
 
 enforcing collision-free hit usage within the layer [18].
 
+## Parallel Track Building
+
+High hit densities require exploring many candidate branches in tandem. The
+`CollaborativeParallelTrackBuilder` distributes seed groups across a pool of
+worker threads and coordinates hit ownership through a shared score book. For a
+hit $h$ with best recorded score $s_h$, a branch with score $s_{\text{branch}}$
+claims the hit only if
+
+$$
+s_{\text{branch}} < s_h - \text{margin},
+$$
+
+ensuring a strictly better track before ownership changes. Denied hits are
+passed back to other threads so exploration continues without conflicts. The
+builder merges per-thread debug graphs, supports an optional per-seed time
+budget, and targets efficient multicore execution [23,24].
+
+Enable the collaborative mode from the CLI:
+
+```bash
+python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --parallel
+```
+
+By default eight worker threads and a claim margin of 1.0 are used; these
+parameters can be tuned by instantiating `CollaborativeParallelTrackBuilder`
+directly in your own scripts.
+
 ## Code Structure
 
 ```text
@@ -132,9 +213,7 @@ Top-level files:
      python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --pt 2.0
      ```
 
-     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,
-     ``ga``, ``hungarian``) and adjust ``--config`` to use a custom
-     JSON configuration.  Use ``-h`` for the full list of options.
+     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,``ga``, ``hungarian``). Add ``--parallel`` to enable the collaborative track builder and ``--config`` to use a custom JSON configuration. Use ``-h`` for the full list of options.
 
 4. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
 
@@ -162,5 +241,8 @@ Top-level files:
 20. Blum, Riegler & Rolandi, _Particle Detection with Drift Chambers_, 2nd ed., Springer (2008).
 21. Bar-Shalom, Li & Kirubarajan, _Estimation with Applications to Tracking and Navigation_, 2nd ed., Wiley (2001).
 22. Eiben & Smith, _Introduction to Evolutionary Computing_, 2nd ed., Springer (2015).
+23. Cerati _et al._, "Parallelized Kalman Filter Tracking on Many-Core Processors and GPUs," J. Phys.: Conf. Ser. **608**, 012057 (2015).
+24. Klijnsma _et al._, "Multi-threaded and vectorized Kalman Filter tracking for the CMS experiment," Comput. Softw. Big Sci. **3**, 11 (2019).
+25. Highland, "Some Practical Remarks on Multiple Scattering," Nucl. Instrum. Methods **129**, 497–499 (1975).
 
 _Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry._
