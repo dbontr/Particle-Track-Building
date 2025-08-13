@@ -255,4 +255,4 @@ Top-level files:
 31. D. J. Webb, W. M. Alobaidi and E. Sandgren, "Maze Navigation via Genetic Optimization," Intell. Inf. Manag. **10**, 215 (2017), Available at: [https://www.scirp.org/reference/referencespapers?referenceid=2173538](https://www.scirp.org/reference/referencespapers?referenceid=2173538).  
 32. H. M. Gray, "Quantum Pattern Recognition Algorithms for Charged Particle Tracking," Philos. Trans. R. Soc. A **380**, 20210103 (2021), Available at: [https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103](https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103).  
 
-_Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry._
+*Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry.*
