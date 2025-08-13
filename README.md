@@ -222,31 +222,37 @@ Top-level files:
 
 ## References
 
-1. Yeo _et al._, “Analytic Helix Propagation for Kalman Filters,” JINST **15** (2024).
-2. Battisti _et al._, “Kalman-Filter-Based Tracking in High-Energy Physics,” Comput. Phys. Commun. **324**, 108601 (2024).
-3. Strandlie & Frühwirth, “Track Fitting with Combinatorial Kalman Filter,” Nucl. Instrum. Methods A **559**, 305–308 (2007).
-4. Schöning, “Advanced Seeding Techniques for Track Reconstruction,” CERN-THESIS-2021-042 (2021).
-5. Jackson, J. D., “Classical Electrodynamics,” 3rd ed., Wiley (1998).
-6. Amrouche _et al._, “The Tracking Machine Learning challenge: Accuracy phase,” NeurIPS (2018) / arXiv:1904.06778 (2019).
-7. Friedman, Bentley & Finkel, “An Algorithm for Finding Best Matches in Logarithmic Expected Time,” ACM Trans. Math. Softw. **3**, 209–226 (1977).
-8. SciPy `cKDTree` documentation, SciPy v1.10.1, [https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html)
-9. Welch & Bishop, “An Introduction to the Kalman Filter,” University of North Carolina at Chapel Hill (1995).
-10. MathWorks, “Tuning Kalman Filter to Improve State Estimation,” MATLAB & Simulink documentation (2024).
-11. ACTS Collaboration, “Track Seeding,” ACTS documentation v4.0.0, [https://acts.readthedocs.io/en/v4.0.0/core/seeding.html](https://acts.readthedocs.io/en/v4.0.0/core/seeding.html)
-12. Golling _et al._, “TrackML: a tracking Machine Learning challenge,” EPJ Web of Conferences **214**, 06037 (2019).
-13. Dorigo & Stützle, _Ant Colony Optimization_, MIT Press (2004).
-14. Hart, Nilsson & Raphael, “A Formal Basis for the Heuristic Determination of Minimum Cost Paths,” IEEE Trans. Syst. Sci. Cybern. **4**, 100–107 (1968).
-15. Holland, _Adaptation in Natural and Artificial Systems_, Univ. of Michigan Press (1975); Goldberg, _Genetic Algorithms in Search, Optimization, and Machine Learning_, Addison‑Wesley (1989).
-16. Kennedy & Eberhart, “Particle Swarm Optimization,” Proc. IEEE Int. Conf. Neural Networks, 1942–1948 (1995).
-17. Kirkpatrick, Gelatt & Vecchi, “Optimization by Simulated Annealing,” Science **220**, 671–680 (1983).
-18. Kuhn, “The Hungarian Method for the Assignment Problem,” Nav. Res. Logist. Q. **2**, 83–97 (1955).
-19. Frühwirth, “Application of Kalman filtering to track and vertex fitting,” Nucl. Instrum. Methods A **262**, 444–450 (1987).
-20. Blum, Riegler & Rolandi, _Particle Detection with Drift Chambers_, 2nd ed., Springer (2008).
-21. Bar-Shalom, Li & Kirubarajan, _Estimation with Applications to Tracking and Navigation_, 2nd ed., Wiley (2001).
-22. Eiben & Smith, _Introduction to Evolutionary Computing_, 2nd ed., Springer (2015).
-23. Cerati _et al._, "Parallelized Kalman Filter Tracking on Many-Core Processors and GPUs," J. Phys.: Conf. Ser. **608**, 012057 (2015).
-24. Klijnsma _et al._, "Multi-threaded and vectorized Kalman Filter tracking for the CMS experiment," Comput. Softw. Big Sci. **3**, 11 (2019).
-25. Highland, "Some Practical Remarks on Multiple Scattering," Nucl. Instrum. Methods **129**, 497–499 (1975).
-26. Particle Data Group, P.A. Zyla _et al._, "Review of Particle Physics," Prog. Theor. Exp. Phys. **2024**, 083C01 (2024).
+1. J. Yeo *et al.*, "Analytic Helix Propagation for Kalman Filters," JINST **15**, P08012 (2024).  
+2. M. Battisti *et al.*, "Kalman-Filter-Based Tracking in High-Energy Physics," Comput. Phys. Commun. **324**, 108601 (2024).  
+3. A. Strandlie and R. Frühwirth, "Track Fitting with Combinatorial Kalman Filter," Nucl. Instrum. Methods Phys. Res., Sect. A **559**, 305 (2007).  
+4. A. Schöning, "Advanced Seeding Techniques for Track Reconstruction," CERN-THESIS-2021-042 (2021).  
+5. J. D. Jackson, *Classical Electrodynamics*, 3rd ed., Wiley (1998).  
+6. M. Amrouche *et al.*, "The Tracking Machine Learning Challenge: Accuracy Phase," Adv. Neural Inf. Process. Syst. (2018), arXiv:1904.06778 [cs.LG].  
+7. J. H. Friedman, J. L. Bentley and R. A. Finkel, "An Algorithm for Finding Best Matches in Logarithmic Expected Time," ACM Trans. Math. Softw. **3**, 209 (1977).  
+8. SciPy `cKDTree` documentation, SciPy v1.10.1, Available at: [https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html).  
+9. G. Welch and G. Bishop, "An Introduction to the Kalman Filter," Univ. of North Carolina at Chapel Hill, TR 95-041 (1995).  
+10. MathWorks, "Tuning Kalman Filter to Improve State Estimation," MATLAB & Simulink documentation (2024), Available at: [https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html](https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html).  
+11. ACTS Collaboration, "Track Seeding," ACTS documentation v4.0.0, Available at: [https://acts.readthedocs.io/en/v4.0.0/core/seeding.html](https://acts.readthedocs.io/en/v4.0.0/core/seeding.html).  
+12. T. Golling *et al.*, "TrackML: A Tracking Machine Learning Challenge," EPJ Web Conf. **214**, 06037 (2019).  
+13. M. Dorigo and T. Stützle, *Ant Colony Optimization*, MIT Press (2004).  
+14. P. E. Hart, N. J. Nilsson and B. Raphael, "A Formal Basis for the Heuristic Determination of Minimum Cost Paths," IEEE Trans. Syst. Sci. Cybern. **4**, 100 (1968).  
+15. J. H. Holland, *Adaptation in Natural and Artificial Systems*, Univ. of Michigan Press (1975); D. E. Goldberg, *Genetic Algorithms in Search, Optimization, and Machine Learning*, Addison-Wesley (1989).  
+16. J. Kennedy and R. Eberhart, "Particle Swarm Optimization," Proc. IEEE Int. Conf. Neural Netw. **4**, 1942 (1995).  
+17. S. Kirkpatrick, C. D. Gelatt and M. P. Vecchi, "Optimization by Simulated Annealing," Science **220**, 671 (1983).  
+18. H. W. Kuhn, "The Hungarian Method for the Assignment Problem," Nav. Res. Logist. Q. **2**, 83 (1955).  
+19. R. Frühwirth, "Application of Kalman Filtering to Track and Vertex Fitting," Nucl. Instrum. Methods Phys. Res., Sect. A **262**, 444 (1987).  
+20. W. Blum, W. Riegler and L. Rolandi, *Particle Detection with Drift Chambers*, 2nd ed., Springer (2008).  
+21. Y. Bar-Shalom, X. R. Li and T. Kirubarajan, *Estimation with Applications to Tracking and Navigation*, 2nd ed., Wiley (2001).  
+22. A. E. Eiben and J. E. Smith, *Introduction to Evolutionary Computing*, 2nd ed., Springer (2015).  
+23. G. Cerati *et al.*, "Parallelized Kalman Filter Tracking on Many-Core Processors and GPUs," J. Phys. Conf. Ser. **608**, 012057 (2015).  
+24. M. Klijnsma *et al.*, "Multi-threaded and Vectorized Kalman Filter Tracking for the CMS Experiment," Comput. Softw. Big Sci. **3**, 11 (2019).  
+25. V. L. Highland, "Some Practical Remarks on Multiple Scattering," Nucl. Instrum. Methods **129**, 497 (1975).  
+26. Particle Data Group, P. A. Zyla *et al.*, "Review of Particle Physics," Prog. Theor. Exp. Phys. **2024**, 083C01 (2024).  
+27. S. Caillou *et al.*, "Novel Fully-Heterogeneous GNN Designs for Track Reconstruction at the HL-LHC," EPJ Web Conf. **295**, 09028 (2024), Available at: [https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html](https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html).  
+28. G. Cerati *et al.*, "Parallelized and Vectorized Tracking Using Kalman Filters with CMS Detector Geometry and Events," EPJ Web Conf. **214**, 02002 (2019), Available at: [https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html](https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html).  
+29. M. Dorigo, V. Maniezzo and A. Colorni, "Ant System: Optimization by a Colony of Cooperating Agents," IEEE Trans. Syst. Man Cybern. B **26**, 29 (1996).  
+30. J. Kennedy, "Particle Swarm Optimization," in *Encyclopedia of Machine Learning*, Springer (2011), Available at: [https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630](https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630).  
+31. D. J. Webb, W. M. Alobaidi and E. Sandgren, "Maze Navigation via Genetic Optimization," Intell. Inf. Manag. **10**, 215 (2017), Available at: [https://www.scirp.org/reference/referencespapers?referenceid=2173538](https://www.scirp.org/reference/referencespapers?referenceid=2173538).  
+32. H. M. Gray, "Quantum Pattern Recognition Algorithms for Charged Particle Tracking," Philos. Trans. R. Soc. A **380**, 20210103 (2021), Available at: [https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103](https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103).  
 
 _Feel free to adapt parameters (`noise_std`, `num_branches`, gating thresholds) in `config.json` to your dataset and detector geometry._
