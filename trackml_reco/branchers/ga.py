@@ -1,67 +1,104 @@
 import numpy as np
-from typing import Tuple, Dict, List, Optional, Any
-from scipy.spatial import cKDTree
+from typing import Tuple, Dict, List, Optional, Any, Sequence
 import networkx as nx
+from scipy.spatial import cKDTree
+
 from trackml_reco.branchers.brancher import Brancher
+from trackml_reco.ekf_kernels import chi2_batch, kalman_gain
+
 
 class HelixEKFGABrancher(Brancher):
     r"""
-    Fast EKF-based track finder with a Genetic Algorithm (GA) over *per-layer shortlists*.
+    EKF + Genetic Algorithm over *per-layer EKF-gated shortlists* (optimized).
 
-    The GA operates on **indices into precomputed per-layer shortlists**, rather
-    than on the full set of hits. For each layer, a shortlist is built using a
-    single seed-initialized EKF prediction, taking the Top-K candidates ranked
-    by Mahalanobis :math:`\chi^2`. Each GA individual encodes one hit index per
-    layer, selecting a candidate from that layer's shortlist.
+    This brancher runs a Genetic Algorithm (GA) over **indices into fixed
+    per-layer shortlists** of hit candidates. Shortlists are built **once**
+    per run using χ² gating from :meth:`Brancher._layer_topk_candidates`
+    (Cholesky solves; no inverses). Each GA individual represents a sequence
+    of shortlist picks—one per layer—and is evaluated by an EKF that shares
+    a single layer gain across all candidates at that layer.
 
-    This dramatically reduces the search space, making mutation and crossover
-    cheap, and removing most per-individual KD-tree queries — ideal for running
-    many seeds in parallel.
+    **State/measurement convention.** The EKF state is
+    :math:`\mathbf{x}=[x,y,z,v_x,v_y,v_z,\kappa]^\top\in\mathbb{R}^7`,
+    the measurement is position :math:`\mathbf{z}\in\mathbb{R}^3`, and the
+    measurement Jacobian :math:`\mathbf{H}\in\mathbb{R}^{3\times7}` extracts
+    the first three components. With predicted :math:`(\hat{\mathbf{x}},\mathbf{P}^- )`:
+
+    .. math::
+
+        \mathbf{S} = \mathbf{H}\mathbf{P}^- \mathbf{H}^\top + \mathbf{R},\qquad
+        \mathbf{K} = \texttt{kalman\_gain}(\mathbf{P}^-,\mathbf{H},\mathbf{S}), \\
+        \mathbf{x}^+ = \hat{\mathbf{x}} + \mathbf{K}(\mathbf{z}-\hat{\mathbf{x}}_{0:3}),\qquad
+        \mathbf{P}^+ \approx (\mathbf{I}-\mathbf{K}\mathbf{H})\,\mathbf{P}^- .
+
+    **Fitness (objective).** For an individual that selects hits
+    :math:`\mathbf{z}_{1:L}`, the score minimized by GA is the accumulated
+    per-layer χ²:
+
+    .. math::
+
+        J = \sum_{\ell=1}^{L} \chi^2_\ell, \qquad
+        \chi^2_\ell = (\mathbf{z}_\ell - \hat{\mathbf{x}}_{\ell,0:3})^\top
+                      \mathbf{S}_\ell^{-1}(\mathbf{z}_\ell - \hat{\mathbf{x}}_{\ell,0:3}).
+
+    What makes this fast
+    --------------------
+    • **Shortlists once per run** via :meth:`_build_shortlists` /
+      :meth:`Brancher._layer_topk_candidates` (stable χ² via Cholesky).  
+    • **Per-individual EKF** uses :meth:`Brancher._ekf_predict` +
+      :meth:`Brancher._ekf_update_meas` (one gain per layer).  
+    • **Allocation hygiene**: ``__slots__``, cached :math:`\mathbf{H}/\mathbf{I}`,
+      consistent dtype from banks.  
+    • **Vector-friendly GA**: elitism + tournament selection + one-point
+      crossover + per-gene mutation.  
+    • **Graph** is built **once** for the best individual only (optional).
 
     Parameters
     ----------
-    trees : dict[(int, int), tuple(cKDTree, ndarray, ndarray)]
-        Mapping ``(volume_id, layer_id) → (KD-tree, points, hit_ids)``.
-        * ``points`` has shape ``(N, 3)``.
-        * ``hit_ids`` has shape ``(N,)``.
-    layer_surfaces : dict[(int, int), dict]
-        Geometry per layer:
-
-        * Disk: ``{'type': 'disk', 'n': normal_vec, 'p': point_on_plane}``.
-        * Cylinder: ``{'type': 'cylinder', 'R': radius}``.
-    noise_std : float, optional
-        Isotropic measurement standard deviation (meters).
-        Sets :math:`R = \sigma^2 I_3`. Default is ``2.0``.
-    B_z : float, optional
-        Magnetic field along z-axis (Tesla). Default ``0.002``.
+    trees, layer_surfaces, noise_std, B_z, max_cands, step_candidates
+        Forwarded to :class:`Brancher`.
     pop_size : int, optional
-        GA population size. Default ``24``.
+        GA population size (default ``24``).
     n_gens : int, optional
-        Maximum number of generations. Default ``12``.
+        Maximum generations (default ``12``).
     cx_rate : float, optional
-        One-point crossover probability. Default ``0.7``.
+        Crossover probability (default ``0.7``).
     mut_rate : float, optional
-        Per-gene mutation probability. Default ``0.15``.
-    max_cands : int, optional
-        Maximum KD-tree neighbors to fetch (base class). Default ``10``.
-    step_candidates : int, optional
-        Shortlist size per layer. Default ``6``.
+        Independent per-gene mutation probability (default ``0.15``).
     elite_frac : float, optional
-        Fraction of elites preserved each generation. Default ``0.1``.
+        Fraction of elites carried unchanged to the next generation (default ``0.10``).
     tournament_k : int, optional
-        Tournament size for selection. Default ``3``.
+        Tournament size for parent selection (default ``3``).
     patience : int, optional
-        Stop early if no improvement in best score for this many generations.
-        Default ``3``.
+        Early-stop if no improvement in best score for this many generations (default ``3``).
     rng_seed : int or None, optional
-        Random number generator seed. Default ``None``.
+        Seed for the internal RNG used by GA operators.
+
+    Attributes
+    ----------
+    layer_surfaces : dict
+        Geometry per layer (disks/cylinders).
+    pop_size, n_gens, cx_rate, mut_rate, elite_frac, tournament_k, patience
+        GA hyperparameters.
+    _H, _I : ndarray
+        Cached measurement Jacobian and identity for EKF updates.
+    _rng : numpy.random.Generator
+        RNG for GA operators.
+    _dtype : numpy dtype
+        Numeric dtype inferred from the first layer's points.
 
     Notes
     -----
-    * NetworkX graphs are **not** assembled unless ``plot_tree=True`` in :meth:`run`.
-    * Shortlists are rebuilt for every :meth:`run` call from the seed state,
-      so they are specific to the given seed's geometry and timing.
+    - You can pass call-scoped ``deny_hits`` to :meth:`run` or configure a
+      persistent deny policy via :meth:`Brancher.set_deny_hits`. Denies are
+      honored during shortlist construction.
     """
+
+    __slots__ = (
+        "layer_surfaces", "pop_size", "n_gens", "cx_rate", "mut_rate",
+        "elite_frac", "tournament_k", "patience",
+        "state_dim", "_rng", "_H", "_I", "_dtype"
+    )
 
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]],
@@ -83,107 +120,105 @@ class HelixEKFGABrancher(Brancher):
                          layers=list(layer_surfaces.keys()),
                          noise_std=noise_std,
                          B_z=B_z,
-                         max_cands=max_cands)
+                         max_cands=max_cands,
+                         step_candidates=step_candidates)
+
         self.layer_surfaces = layer_surfaces
         self.pop_size = int(pop_size)
         self.n_gens = int(n_gens)
         self.cx_rate = float(cx_rate)
         self.mut_rate = float(mut_rate)
-        self.step_candidates = int(step_candidates)
         self.elite_frac = float(elite_frac)
         self.tournament_k = int(tournament_k)
         self.patience = int(patience)
+
         self.state_dim = 7
-        self.rng = np.random.default_rng(rng_seed)
+        self._rng = np.random.default_rng(rng_seed)
+        self._H = self.H_jac(None)                  # constant 3x7 position extractor
+        self._I = np.eye(self.state_dim)
+
+        # Detect a consistent dtype from any layer's point bank
+        try:
+            any_layer = next(iter(trees))
+            self._dtype = trees[any_layer][1].dtype
+        except Exception:
+            self._dtype = np.float64
 
     def _build_shortlists(self,
                           seed_xyz: np.ndarray,
-                          t: np.ndarray,
-                          layers: List[Tuple[int, int]]
+                          t: Optional[np.ndarray],
+                          layers: List[Tuple[int, int]],
+                          deny_hits: Optional[Sequence[int]] = None
                           ) -> Dict[Tuple[int, int], Dict[str, np.ndarray]]:
         r"""
-        Build Top-K candidate shortlists per layer using a seed-based EKF prediction.
+        Build per-layer **shortlists** by predict-only EKF from the seed.
+
+        For each layer, perform a geometric time-of-flight solve to the surface,
+        run :meth:`Brancher._ekf_predict` to get :math:`(\hat{\mathbf{x}},\mathbf{P}^-,\mathbf{S})`,
+        and then call :meth:`Brancher._layer_topk_candidates` to select the
+        Top-:math:`K` gated hits by χ² (ascending). Only positions and IDs are
+        stored in the shortlist; χ² is recomputed as needed during evaluation.
 
         Parameters
         ----------
         seed_xyz : ndarray, shape (3, 3)
-            Three seed hit positions :math:`(x,y,z)`.
-        t : ndarray
-            Time points for seed spacing. Used to estimate seed velocity and curvature.
-        layers : list of tuple(int, int)
-            Ordered layer keys.
+            Seed triplet used to initialize velocity/curvature.
+        t : ndarray or None
+            Optional timestamps aligned with the seed; if supplied, the initial
+            step uses :math:`\Delta t_0=t_1-t_0`, else ``1.0``.
+        layers : list[tuple[int, int]]
+            Ordered layer keys to build shortlists for.
+        deny_hits : sequence[int] or None, optional
+            Per-call deny list applied during gating.
 
         Returns
         -------
-        shortlists : dict
-            Maps each ``layer_key`` to a dictionary:
-
-            * ``'pts'`` : ndarray, shape (K, 3), candidate hit positions.
-            * ``'ids'`` : ndarray, shape (K,), corresponding hit IDs.
+        shortlists : dict[layer_key -> dict]
+            For each layer ``L``, a dict with keys:
+            ``'pts'`` (``(K,3)`` float array) and ``'ids'`` (``(K,)`` int array).
 
         Notes
         -----
-        * Candidates are gated using :math:`r = 3 \sqrt{\lambda_{\max}(S)}`,
-          where :math:`S = H P_{\text{pred}} H^{\mathsf{T}} + R`.
-        * Sorted by Mahalanobis distance:
-
-          .. math::
-
-             \chi^2 = (z - \hat{x})^{\mathsf{T}} S^{-1} (z - \hat{x}).
+        The predict-only chain advances :math:`(\hat{\mathbf{x}},\mathbf{P}^- )`
+        to the next surface **without** applying updates, ensuring shortlist
+        construction is independent of individual genomes.
         """
-        dt0 = t[1] - t[0] if t is not None else 1.0
-        v0, k0 = self._estimate_seed_helix(seed_xyz, dt0, self.B_z)
-        state = np.hstack([seed_xyz[2], v0, k0])
-        cov = np.eye(self.state_dim) * 0.1
+        dt0 = float((t[1] - t[0]) if (t is not None and len(t) >= 2) else 1.0)
+        v0, k0 = self._estimate_seed_helix(seed_xyz.astype(self._dtype), dt0, self.B_z)
+        state = np.hstack([seed_xyz[2].astype(self._dtype), v0.astype(self._dtype), np.array([k0], dtype=self._dtype)])
+        cov = np.eye(self.state_dim, dtype=self._dtype) * 0.1
 
-        H = self.H_jac(None)
         short: Dict[Tuple[int, int], Dict[str, np.ndarray]] = {}
+        deny = list(map(int, deny_hits)) if deny_hits is not None else None
 
-        for layer in layers:
-            surf = self.layer_surfaces[layer]
-            # Predict to layer once from the seed state
+        Ltot = len(layers)
+        for i, layer in enumerate(layers):
+            depth_frac = (i + 1) / max(1, Ltot)
             try:
-                dt = self._solve_dt_to_surface(state, surf, dt_init=dt0)
+                dt = self._solve_dt_to_surface(state, self.layer_surfaces[layer], dt_init=dt0)
             except Exception:
-                # No shortlist (empty) if intersection fails
-                short[layer] = {'pts': np.empty((0, 3), float),
-                                'ids': np.empty((0,), int)}
+                short[layer] = {'pts': np.empty((0, 3), dtype=self._dtype),
+                                'ids': np.empty((0,), dtype=int)}
                 continue
 
-            F = self.compute_F(state, dt)
-            x_pred = self.propagate(state, dt)
-            P_pred = F @ cov @ F.T + self.Q0 * dt
-            S = H @ P_pred @ H.T + self.R
-            # gate radius from S
-            try:
-                gate_r = 3.0 * np.sqrt(np.max(np.linalg.eigvalsh(S)))
-            except Exception:
-                gate_r = 3.0 * 3.0
+            # Fast EKF predict (uses base kernels)
+            x_pred, P_pred, S, H = self._ekf_predict(state, cov, float(dt))
 
-            tree, pts_all, ids_all = self.trees[layer]
-            idxs = tree.query_ball_point(x_pred[:3], r=float(gate_r))
-            if not idxs:
-                short[layer] = {'pts': np.empty((0, 3), float),
-                                'ids': np.empty((0,), int)}
-                continue
+            # Use Brancher’s optimized gate + vectorized χ² + Top-K (sorted)
+            pts, ids, _chi2 = self._layer_topk_candidates(
+                x_pred, S, layer,
+                k=max(1, min(self.step_candidates, 32)),
+                depth_frac=depth_frac,
+                gate_mul=3.0,          # base multiplier; shortlist already tight
+                gate_tighten=0.15,
+                deny_hits=deny
+            )
+            short[layer] = {'pts': pts.astype(self._dtype, copy=False),
+                            'ids': ids.astype(int, copy=False)}
 
-            cand_pts = pts_all[idxs]
-            cand_ids = ids_all[idxs]
-
-            # Rank by Mahalanobis distance w.r.t. S (vectorized)
-            try:
-                S_inv = np.linalg.inv(S)
-                diff = cand_pts - x_pred[:3]
-                chi2 = np.einsum('ij,jk,ik->i', diff, S_inv, diff)
-            except Exception:
-                # fallback: Euclidean
-                diff = cand_pts - x_pred[:3]
-                chi2 = np.sum(diff * diff, axis=1)
-
-            k = min(self.step_candidates, cand_pts.shape[0])
-            order = np.argpartition(chi2, k - 1)[:k]
-            short[layer] = {'pts': cand_pts[order].astype(float),
-                            'ids': cand_ids[order].astype(int)}
+            # Predict-only chain to the next surface
+            state = x_pred
+            cov = P_pred
 
         return short
 
@@ -191,191 +226,207 @@ class HelixEKFGABrancher(Brancher):
                          shortlists: Dict[Tuple[int, int], Dict[str, np.ndarray]],
                          layers: List[Tuple[int, int]]) -> np.ndarray:
         r"""
-        Create the initial GA population.
+        Initialize a population of genomes over shortlist indices.
 
-        Each individual is a vector of integers of length ``len(layers)``,
-        where gene ``i`` is the index into that layer's shortlist:
-
-        .. math::
-
-            g_i \in \{0, 1, \dots, K_i - 1\}, \quad\text{or}\quad g_i = -1 \ \text{if empty}.
+        Each genome is a vector of length ``len(layers)``. Gene ``g_L`` is an
+        index in ``[0, K_L-1]`` for the layer's shortlist of size ``K_L``.
+        The value ``-1`` denotes "no pick" and triggers a cheapest-in-shortlist
+        fallback during evaluation.
 
         Parameters
         ----------
         shortlists : dict
-            Output from :meth:`_build_shortlists`.
-        layers : list of tuple
-            Ordered layer keys.
+            Output of :meth:`_build_shortlists`.
+        layers : list[tuple[int, int]]
+            Layer ordering (defines genome length).
 
         Returns
         -------
-        pop : ndarray, shape (pop_size, n_layers)
-            Integer-encoded GA population.
+        ndarray, shape (pop_size, n_layers), dtype int32
+            Initial population with uniform random valid indices where possible,
+            else ``-1``.
         """
-        genes_per_layer = [shortlists[ly]['ids'].shape[0] for ly in layers]
-        pop = -np.ones((self.pop_size, len(layers)), dtype=int)
-        for L, K in enumerate(genes_per_layer):
-            if K == 0:
-                continue
-            pop[:, L] = self.rng.integers(0, K, size=self.pop_size)
+        nL = len(layers)
+        pop = -np.ones((self.pop_size, nL), dtype=np.int32)
+        for L, layer in enumerate(layers):
+            K = shortlists[layer]['ids'].shape[0]
+            if K > 0:
+                pop[:, L] = self._rng.integers(0, K, size=self.pop_size, endpoint=False)
         return pop
 
-    def _tournament(self, fitness: np.ndarray) -> int:
+    def _tournament_indices(self, fitness: np.ndarray, n_winners: int) -> np.ndarray:
         r"""
-        Select an individual index via tournament selection.
+        Tournament selection (vectorized) — return indices of winners.
+
+        For each of ``n_winners`` tournaments, sample ``tournament_k`` distinct
+        individuals (with replacement across tournaments) and pick the one with
+        the smallest fitness:
+
+        .. math::
+
+            i^\star = \arg\min_{i \in \mathcal{T}} J_i .
 
         Parameters
         ----------
         fitness : ndarray, shape (pop_size,)
-            Fitness scores (lower is better).
+            Fitness values :math:`J_i` (lower is better).
+        n_winners : int
+            Number of tournament winners to select.
 
         Returns
         -------
-        int
-            Index of the selected individual.
+        ndarray, shape (n_winners,), dtype int32
+            Indices of selected parents.
         """
-        idx = self.rng.integers(0, self.pop_size, size=self.tournament_k)
-        best = idx[np.argmin(fitness[idx])]
-        return int(best)
+        # shape: (n_winners, tournament_k)
+        choices = self._rng.integers(0, self.pop_size, size=(n_winners, self.tournament_k))
+        subfit = fitness[choices]                   # (n_winners, k)
+        winners = choices[np.arange(n_winners), np.argmin(subfit, axis=1)]
+        return winners.astype(np.int32, copy=False)
 
-    def _crossover(self, a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    def _crossover_pair(self, a: np.ndarray, b: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
         r"""
-        Perform one-point crossover between two parents.
+        One-point crossover for two parents.
+
+        With probability ``cx_rate``, draw a cut-point :math:`p\in\{1,\dots,L-1\}`
+        and swap tails:
+
+        .. math::
+
+            \text{child}_1 = [a_{:p},\, b_{p:}],\qquad
+            \text{child}_2 = [b_{:p},\, a_{p:}].
+
+        If crossover does not occur or the genome is shorter than 2, parents are
+        copied unchanged.
 
         Parameters
         ----------
-        a, b : ndarray
+        a, b : ndarray, shape (L,), dtype int
             Parent genomes.
 
         Returns
         -------
-        c1, c2 : ndarray
-            Child genomes (copies if no crossover occurs).
+        child1, child2 : ndarray
+            Offspring genomes (copies if no crossover).
         """
-        if self.rng.random() > self.cx_rate or a.size < 2:
+        if (a.size < 2) or (self._rng.random() > self.cx_rate):
             return a.copy(), b.copy()
-        pt = int(self.rng.integers(1, a.size))
+        pt = int(self._rng.integers(1, a.size))
         return np.concatenate([a[:pt], b[pt:]]), np.concatenate([b[:pt], a[pt:]])
 
-    def _mutate(self,
-                child: np.ndarray,
-                shortlists: Dict[Tuple[int, int], Dict[str, np.ndarray]],
-                layers: List[Tuple[int, int]]) -> np.ndarray:
+    def _mutate_inplace(self,
+                        child: np.ndarray,
+                        shortlists: Dict[Tuple[int, int], Dict[str, np.ndarray]],
+                        layers: List[Tuple[int, int]]) -> None:
         r"""
-        Apply per-gene mutation to a child genome.
+        Per-gene mutation in place to a *different* valid index (if possible).
+
+        For gene :math:`g_L` with shortlist size :math:`K_L`:
+
+        - With probability ``mut_rate``, if :math:`K_L\le 1` no change.
+        - If ``g_L < 0``, sample uniformly from ``[0, K_L-1]``.
+        - Else, sample a uniform alternative in ``[0, K_L-1]\setminus\{g_L\}``.
 
         Parameters
         ----------
-        child : ndarray
-            Child genome (modified in-place).
+        child : ndarray, shape (L,), dtype int
+            Genome to mutate (modified in place).
         shortlists : dict
-            Output from :meth:`_build_shortlists`.
-        layers : list of tuple
-            Ordered layer keys.
-
-        Returns
-        -------
-        ndarray
-            Mutated genome.
-
-        Notes
-        -----
-        Mutation chooses a different index for the gene's layer when possible.
+            Per-layer shortlists.
+        layers : list[tuple[int, int]]
+            Ordered layers corresponding to genome positions.
         """
         for L, layer in enumerate(layers):
-            if self.rng.random() > self.mut_rate:
+            if self._rng.random() > self.mut_rate:
                 continue
             K = shortlists[layer]['ids'].shape[0]
             if K <= 1:
                 continue
-            cur = int(child[L]) if child[L] >= 0 else -1
-            # choose an alternative index
-            alt = self.rng.integers(0, K - 1)
-            if cur >= 0 and alt >= cur:
-                alt += 1
-            child[L] = int(alt)
-        return child
+            cur = int(child[L])
+            if cur < 0:
+                child[L] = int(self._rng.integers(0, K))
+            else:
+                # sample from 0..K-2 and shift to avoid 'cur'
+                alt = int(self._rng.integers(0, K - 1))
+                if alt >= cur:
+                    alt += 1
+                child[L] = alt
 
     def _eval_sequence(self,
                        seed_xyz: np.ndarray,
-                       t: np.ndarray,
+                       t: Optional[np.ndarray],
                        layers: List[Tuple[int, int]],
                        shortlists: Dict[Tuple[int, int], Dict[str, np.ndarray]],
                        gene_row: np.ndarray,
                        build_graph: bool) -> Dict[str, Any]:
         r"""
-        Evaluate a GA individual by running an EKF through its chosen shortlist hits.
+        Evaluate one genome: EKF predict→select→update across layers.
+
+        For layer :math:`\ell`:
+
+        1. Solve :math:`\Delta t_\ell` to the layer surface and compute
+           :math:`(\hat{\mathbf{x}}_\ell,\mathbf{P}^-_\ell,\mathbf{S}_\ell)`
+           via :meth:`Brancher._ekf_predict`.
+        2. Choose the gene's shortlist hit index. If the gene is ``-1`` or
+           out-of-range, fall back to the cheapest (minimum χ²) within the
+           shortlist under the **current** :math:`\mathbf{S}_\ell`.
+        3. Update with a single Cholesky-based gain
+           :math:`\mathbf{K}_\ell=\texttt{kalman\_gain}(\mathbf{P}^-_\ell,\mathbf{H},\mathbf{S}_\ell)`:
+
+           .. math::
+
+               \mathbf{x}^+_\ell = \hat{\mathbf{x}}_\ell + \mathbf{K}_\ell(\mathbf{z}_\ell-\hat{\mathbf{x}}_{\ell,0:3}), \qquad
+               \mathbf{P}^+_\ell \approx (\mathbf{I}-\mathbf{K}_\ell\mathbf{H})\,\mathbf{P}^-_\ell.
+
+        The fitness increment is :math:`\chi^2_\ell` for the chosen hit, as
+        computed by :func:`trackml_reco.ekf_kernels.chi2_batch`.
 
         Parameters
         ----------
         seed_xyz : ndarray, shape (3, 3)
-            Three seed hit positions.
-        t : ndarray
-            Time points for seed spacing.
-        layers : list of tuple
-            Ordered layer keys.
+            Seed triplet for initializing the helix.
+        t : ndarray or None
+            Optional timestamps for determining the initial :math:`\Delta t_0`.
+        layers : list[tuple[int, int]]
+            Layer sequence.
         shortlists : dict
-            Per-layer shortlists from :meth:`_build_shortlists`.
-        gene_row : ndarray, shape (n_layers,)
-            Genome: one shortlist index per layer.
+            Output of :meth:`_build_shortlists`.
+        gene_row : ndarray, shape (L,), dtype int
+            Genome to evaluate (one index per layer, or ``-1`` for fallback).
         build_graph : bool
-            If True, record an expansion graph of chosen edges.
+            If ``True``, build and return a graph of the chosen edges.
 
         Returns
         -------
         result : dict
-            Contains:
-            * ``'traj'`` : list of hit positions (ndarray, shape (3,)),
-            * ``'hit_ids'`` : list of int,
-            * ``'state'`` : final EKF state vector,
-            * ``'cov'`` : final EKF covariance matrix,
-            * ``'score'`` : accumulated :math:`\chi^2`,
-            * ``'graph'`` : :class:`networkx.DiGraph` (empty if not built).
-
-        Notes
-        -----
-        At each layer, the chosen hit index ``j`` maps to:
-
-        .. math::
-
-           z_j \in \text{shortlist}_{\text{layer}}
-
-        and the branch is updated with the standard EKF equations:
-
-        .. math::
-
-           K &= P_{\text{pred}} H^{\mathsf{T}} S^{-1},\\
-           x^+ &= x^- + K (z_j - H x^-),\\
-           P^+ &= (I - K H) P_{\text{pred}}.
+            Keys: ``'traj'``, ``'hit_ids'``, ``'state'``, ``'cov'``, ``'score'``,
+            and ``'graph'`` (``nx.DiGraph`` if requested, else empty graph).
         """
-        dt0 = t[1] - t[0] if t is not None else 1.0
-        v0, k0 = self._estimate_seed_helix(seed_xyz, dt0, self.B_z)
-        state = np.hstack([seed_xyz[2], v0, k0])
-        cov = np.eye(self.state_dim) * 0.1
-        traj: List[np.ndarray] = [seed_xyz[0], seed_xyz[1], seed_xyz[2]]
+        dt0 = float((t[1] - t[0]) if (t is not None and len(t) >= 2) else 1.0)
+        v0, k0 = self._estimate_seed_helix(seed_xyz.astype(self._dtype), dt0, self.B_z)
+        state = np.hstack([seed_xyz[2].astype(self._dtype), v0.astype(self._dtype), np.array([k0], dtype=self._dtype)])
+        cov = np.eye(self.state_dim, dtype=self._dtype) * 0.1
+
+        traj: List[np.ndarray] = [seed_xyz[0].astype(self._dtype),
+                                  seed_xyz[1].astype(self._dtype),
+                                  seed_xyz[2].astype(self._dtype)]
         hit_ids: List[int] = []
         score = 0.0
 
-        H = self.H_jac(None)
+        H = self._H
         G = nx.DiGraph() if build_graph else None
+        N = len(layers)
 
         for i, layer in enumerate(layers):
             surf = self.layer_surfaces[layer]
-            # Propagate to this surface
             try:
                 dt = self._solve_dt_to_surface(state, surf, dt_init=dt0)
             except Exception:
                 break
 
-            F = self.compute_F(state, dt)
-            x_pred = self.propagate(state, dt)
-            P_pred = F @ cov @ F.T + self.Q0 * dt
-            S = H @ P_pred @ H.T + self.R
-            try:
-                S_inv = np.linalg.inv(S)
-            except np.linalg.LinAlgError:
-                break
-
+            # Predict and build S
+            x_pred, P_pred, S, _H_cached = self._ekf_predict(state, cov, float(dt))
+            # Vector of candidates for this layer (from shortlist)
             pts = shortlists[layer]['pts']
             ids = shortlists[layer]['ids']
             if pts.shape[0] == 0:
@@ -383,84 +434,104 @@ class HelixEKFGABrancher(Brancher):
 
             j = int(gene_row[i])
             if j < 0 or j >= pts.shape[0]:
-                # invalid gene -> pick cheapest within shortlist (failsafe)
+                # Fallback: cheapest within shortlist under current S
                 diff_all = pts - x_pred[:3]
-                chi2_all = np.einsum('ij,jk,ik->i', diff_all, S_inv, diff_all)
+                chi2_all = chi2_batch(diff_all, S)        # stable Cholesky inside
                 j = int(np.argmin(chi2_all))
+                chi2_j = float(chi2_all[j])
+            else:
+                # Compute just chosen residual's χ²
+                diff_j = pts[j] - x_pred[:3]
+                chi2_j = float(chi2_batch(diff_j[None, :], S)[0])
 
             z = pts[j]
-            diff = z - x_pred[:3]
-            chi2 = float(diff @ S_inv @ diff)
-
-            # EKF update
-            K_gain = P_pred @ H.T @ S_inv
-            state = x_pred + K_gain @ diff
-            cov = (np.eye(self.state_dim) - K_gain @ H) @ P_pred
+            # EKF update with fast gain
+            state, cov = self._ekf_update_meas(x_pred, P_pred, z, H, S)
 
             traj.append(z)
             hit_ids.append(int(ids[j]))
-            score += chi2
+            score += chi2_j
 
             if build_graph:
-                G.add_edge((i, tuple(traj[-2])), (i + 1, tuple(z)), cost=chi2)
+                G.add_edge((i, tuple(traj[-2])), (i + 1, tuple(z)), cost=chi2_j)
 
-        return {'traj': traj, 'hit_ids': hit_ids, 'state': state, 'cov': cov,
-                'score': float(score), 'graph': (G if build_graph else nx.DiGraph())}
+        return {
+            'traj': traj,
+            'hit_ids': hit_ids,
+            'state': state,
+            'cov': cov,
+            'score': float(score),
+            'graph': (G if build_graph else nx.DiGraph())
+        }
 
     def run(self,
             seed_xyz: np.ndarray,
             layers: List[Tuple[int, int]],
-            t: np.ndarray,
-            plot_tree: bool = False) -> Tuple[List[Dict[str, Any]], nx.DiGraph]:
+            t: Optional[np.ndarray],
+            plot_tree: bool = False,
+            *,
+            deny_hits: Optional[Sequence[int]] = None
+            ) -> Tuple[List[Dict[str, Any]], nx.DiGraph]:
         r"""
-        Run the GA to optimize a sequence of shortlist indices.
+        Execute GA over shortlist indices and return the best branch (+ optional graph).
+
+        Pipeline
+        --------
+        1. **Shortlists** (once): predict-only EKF chain from the seed and per-layer
+           χ² gating (honoring optional deny lists) via
+           :meth:`Brancher._layer_topk_candidates`.
+        2. **Initialize** a population over shortlist indices; ``-1`` means
+           "fallback to cheapest".
+        3. **Evaluate** population with :meth:`_eval_sequence`.
+        4. **Generations** (up to ``n_gens`` or early stop):
+           - **Elitism**: keep the top ``ceil(elite_frac*pop_size)`` genomes unchanged.
+           - **Parent selection**: vectorized tournaments of size ``tournament_k``.
+           - **Crossover**: one-point with probability ``cx_rate``.
+           - **Mutation**: per-gene with probability ``mut_rate`` to a *different* index.
+           - **Evaluation**: reuse elite phenotypes; evaluate children.
+           - **Early stopping** after ``patience`` stagnant generations.
+        5. **Result**: take the best genome; if ``plot_tree=True``, re-evaluate it
+           with ``build_graph=True`` to return its sparse path graph.
 
         Parameters
         ----------
         seed_xyz : ndarray, shape (3, 3)
-            Three seed hit positions.
-        layers : list of tuple(int, int)
-            Ordered list of ``(volume_id, layer_id)`` to traverse.
-        t : ndarray
-            Time points for seed spacing.
+            Three seed points to initialize the helix (two segments).
+        layers : list[tuple[int, int]]
+            Ordered traversal of layer keys.
+        t : ndarray or None
+            Optional timestamps aligned with the seed.
         plot_tree : bool, optional
-            If True, return a NetworkX graph of the best path.
+            If ``True``, return the best individual's path graph (``nx.DiGraph``).
+        deny_hits : sequence[int] or None, keyword-only
+            Per-call deny list; persistent behavior can be configured via
+            :meth:`Brancher.set_deny_hits`.
 
         Returns
         -------
-        branches : list of dict
-            One best branch with:
-            * ``traj`` : list of hit positions,
-            * ``hit_ids`` : list of int,
-            * ``state`` : final EKF state,
-            * ``cov`` : final EKF covariance,
-            * ``score`` : accumulated :math:`\chi^2`.
-        G : :class:`networkx.DiGraph`
-            Graph of the best path (empty if ``plot_tree=False``).
+        results : list[dict]
+            A singleton list with the best branch:
+            ``{'traj','hit_ids','state','cov','score'}``.
+        G : networkx.DiGraph
+            Best individual's sparse path graph if requested, else empty graph.
 
         Notes
         -----
-        * GA loop uses:
-          - **elitism**: top ``elite_frac`` fraction carried over,
-          - **tournament selection** for parents,
-          - **one-point crossover** with prob. ``cx_rate``,
-          - **per-gene mutation** with prob. ``mut_rate``.
-        * Early stopping occurs if the best score does not improve for
-          ``patience`` generations.
+        - The fitness is **pure χ²** accumulated along the genome path; if a
+          persistent deny policy is configured in the base, it is applied during
+          shortlist construction (affecting which hits appear there).
+        - If ``layers`` is empty, returns ``([], nx.DiGraph())``.
         """
         if not layers:
             return [], nx.DiGraph()
 
-        # 1) Build per-layer shortlists once
-        shortlists = self._build_shortlists(seed_xyz, t, layers)
+        # 1) Shortlists once, honoring deny list
+        shortlists = self._build_shortlists(seed_xyz, t, layers, deny_hits=deny_hits)
 
-        # 2) Initialize population over shortlist indices
+        # 2) Init population
         pop = self._init_population(shortlists, layers)
-        fitness = np.full(self.pop_size, np.inf, dtype=float)
+        fitness = np.full(self.pop_size, np.inf, dtype=self._dtype)
         phenos: List[Optional[Dict[str, Any]]] = [None] * self.pop_size
-
-        build_graph = bool(plot_tree)
-        global_graph = nx.DiGraph() if build_graph else nx.DiGraph()
 
         # Evaluate initial population
         for i in range(self.pop_size):
@@ -472,37 +543,49 @@ class HelixEKFGABrancher(Brancher):
         no_improve = 0
         n_elite = max(1, int(self.elite_frac * self.pop_size))
 
-        for gen in range(self.n_gens):
-            # --- Elitism ---
+        # 3) GA generations
+        for _gen in range(self.n_gens):
+            # Elites (copy genomes & re-use phenotypes/fitness)
             elite_idx = np.argsort(fitness)[:n_elite]
             elites = pop[elite_idx].copy()
-            elite_ph = [phenos[i] for i in elite_idx]
+            elite_ph = [phenos[idx] for idx in elite_idx]
             elite_fit = fitness[elite_idx].copy()
 
-            # --- New offspring via tournaments ---
+            # Parents via tournaments (vectorized) to produce remaining children
+            n_children = self.pop_size - n_elite
+            parent_idx = self._tournament_indices(fitness, max(2 * n_children, 2))
+            parents = pop[parent_idx]
+
+            # Crossover + mutation
             children = []
-            while len(children) < self.pop_size - n_elite:
-                p1 = pop[self._tournament(fitness)]
-                p2 = pop[self._tournament(fitness)]
-                c1, c2 = self._crossover(p1, p2)
-                c1 = self._mutate(c1, shortlists, layers)
-                c2 = self._mutate(c2, shortlists, layers)
-                children.append(c1)
-                if len(children) < self.pop_size - n_elite:
+            it = iter(parents)
+            while len(children) < n_children:
+                try:
+                    p1 = next(it); p2 = next(it)
+                except StopIteration:
+                    # In case of odd count, resample a parent
+                    p1 = pop[int(self._rng.integers(0, self.pop_size))]
+                    p2 = pop[int(self._rng.integers(0, self.pop_size))]
+                c1, c2 = self._crossover_pair(p1, p2)
+                self._mutate_inplace(c1, shortlists, layers)
+                if len(children) < n_children:
+                    children.append(c1)
+                if len(children) < n_children:
+                    self._mutate_inplace(c2, shortlists, layers)
                     children.append(c2)
 
-            new_pop = np.vstack([elites, np.array(children, dtype=int)])
+            new_pop = np.vstack([elites, np.asarray(children, dtype=np.int32)])
 
-            # Evaluate only children (reuse elites)
-            new_fitness = np.full(self.pop_size, np.inf, dtype=float)
+            # Evaluate: elites reused, children computed
+            new_fitness = np.full(self.pop_size, np.inf, dtype=self._dtype)
             new_phenos: List[Optional[Dict[str, Any]]] = [None] * self.pop_size
 
-            # put elites back
+            # Put elites back
             new_fitness[:n_elite] = elite_fit
             for i, ph in enumerate(elite_ph):
                 new_phenos[i] = ph
 
-            # evaluate children
+            # Evaluate children
             for i in range(n_elite, self.pop_size):
                 ph = self._eval_sequence(seed_xyz, t, layers, shortlists, new_pop[i], build_graph=False)
                 new_phenos[i] = ph
@@ -510,7 +593,7 @@ class HelixEKFGABrancher(Brancher):
 
             pop, phenos, fitness = new_pop, new_phenos, new_fitness
 
-            # Early stopping on stagnation
+            # Early stopping
             best_now = float(np.min(fitness))
             if best_now + 1e-9 < best_prev:
                 best_prev = best_now
@@ -520,13 +603,14 @@ class HelixEKFGABrancher(Brancher):
                 if no_improve >= self.patience:
                     break
 
-        # Final best individual; rebuild its graph only if requested
+        # Final best, build its graph exactly once if requested
         best_idx = int(np.argmin(fitness))
         best_ph = phenos[best_idx]
-        if build_graph:
-            # Re-evaluate *once* with graph building to avoid Nx overhead inside GA
+        if plot_tree:
             best_ph = self._eval_sequence(seed_xyz, t, layers, shortlists, pop[best_idx], build_graph=True)
-            global_graph = best_ph['graph']
+            G = best_ph['graph']
+        else:
+            G = nx.DiGraph()
 
         result = {k: best_ph[k] for k in ('traj', 'hit_ids', 'state', 'cov', 'score')}
-        return [result], global_graph
+        return [result], G

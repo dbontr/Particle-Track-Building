@@ -1,0 +1,109 @@
+{
+  "ekf": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 30},
+    {"name": "step_candidates", "type": "int",   "min": 1,     "max": 10},
+    {"name": "gate_multiplier", "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "gate_tighten",    "type": "float", "min": 0.0,   "max": 0.5},
+    {"name": "build_graph",     "type": "bool"}
+  ],
+
+  "astar": [
+    {"name": "noise_std",         "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",               "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "max_cands",         "type": "int",   "min": 5,     "max": 20},
+    {"name": "step_candidates",   "type": "int",   "min": 1,     "max": 10},
+    {"name": "gate_multiplier",   "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "beam_width",        "type": "int",   "min": 4,     "max": 16},
+    {"name": "angle_weight",      "type": "float", "min": 0.0,   "max": 20.0},
+    {"name": "curvature_weight",  "type": "float", "min": 0.0,   "max": 500.0},
+    {"name": "trend_weight",      "type": "float", "min": 0.0,   "max": 10.0},
+    {"name": "switch_margin",     "type": "float", "min": 0.5,   "max": 3.0},
+    {"name": "perp_weight",       "type": "float", "min": 0.0,   "max": 30.0},
+    {"name": "flip_weight",       "type": "float", "min": 0.0,   "max": 20.0},
+    {"name": "ema_alpha",         "type": "float", "min": 0.05,  "max": 0.95},
+    {"name": "theta_max",         "type": "float", "min": 0.1,   "max": 0.7},
+    {"name": "taper_last_frac",   "type": "float", "min": 0.0,   "max": 0.7},
+    {"name": "min_gate_multiplier","type":"float","min": 0.8,   "max": 2.0}
+  ],
+
+  "aco": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "n_ants",          "type": "int",   "min": 8,     "max": 40},
+    {"name": "n_iters",         "type": "int",   "min": 1,     "max": 10},
+    {"name": "evap_rate",       "type": "float", "min": 0.2,   "max": 0.95},
+    {"name": "alpha",           "type": "float", "min": 0.2,   "max": 2.5},
+    {"name": "beta",            "type": "float", "min": 0.5,   "max": 4.0},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 20},
+    {"name": "step_candidates", "type": "int",   "min": 1,     "max": 10},
+    {"name": "gate_multiplier", "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "tau_min",         "type": "float", "min": 1e-4,  "max": 1e-1, "log": true},
+    {"name": "tau_max",         "type": "float", "min": 0.5,   "max": 10.0},
+    {"name": "angle_weight",    "type": "float", "min": 0.0,   "max": 10.0},
+    {"name": "curvature_weight","type": "float", "min": 0.0,   "max": 500.0}
+  ],
+
+  "pso": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "n_particles",     "type": "int",   "min": 8,     "max": 60},
+    {"name": "n_iters",         "type": "int",   "min": 5,     "max": 40},
+    {"name": "w",               "type": "float", "min": 0.2,   "max": 0.98},
+    {"name": "c1",              "type": "float", "min": 0.3,   "max": 2.8},
+    {"name": "c2",              "type": "float", "min": 0.3,   "max": 2.8},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 20},
+    {"name": "step_candidates", "type": "int",   "min": 1,     "max": 10},
+    {"name": "gate_multiplier", "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "gate_quantile",   "type": "float", "min": 0.95,  "max": 0.999},
+    {"name": "epsilon_greedy",  "type": "float", "min": 0.0,   "max": 0.4},
+    {"name": "eps_min",         "type": "float", "min": 0.0,   "max": 0.2},
+    {"name": "temp0",           "type": "float", "min": 0.2,   "max": 1.2},
+    {"name": "temp_min",        "type": "float", "min": 0.01,  "max": 0.2},
+    {"name": "v_clamp",         "type": "float", "min": 0.5,   "max": 3.0},
+    {"name": "patience",        "type": "int",   "min": 0,     "max": 10}
+  ],
+
+  "sa": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "initial_temp",    "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "cooling_rate",    "type": "float", "min": 0.85,  "max": 0.995},
+    {"name": "n_iters",         "type": "int",   "min": 200,   "max": 3000},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 20},
+    {"name": "step_candidates", "type": "int",   "min": 1,     "max": 10},
+    {"name": "max_no_improve",  "type": "int",   "min": 20,    "max": 500},
+    {"name": "gate_multiplier", "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "gate_tighten",    "type": "float", "min": 0.0,   "max": 0.5},
+    {"name": "time_budget_s",   "type": "float", "min": 0.5,   "max": 10.0},
+    {"name": "graph_stride",    "type": "int",   "min": 5,     "max": 100},
+    {"name": "min_temp",        "type": "float", "min": 1e-5,  "max": 1e-2, "log": true},
+    {"name": "build_graph",     "type": "bool"}
+  ],
+
+  "ga": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "pop_size",        "type": "int",   "min": 10,    "max": 200},
+    {"name": "n_gens",          "type": "int",   "min": 5,     "max": 60},
+    {"name": "cx_rate",         "type": "float", "min": 0.4,   "max": 0.95},
+    {"name": "mut_rate",        "type": "float", "min": 0.01,  "max": 0.5},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 20},
+    {"name": "step_candidates", "type": "int",   "min": 3,     "max": 12},
+    {"name": "elite_frac",      "type": "float", "min": 0.0,   "max": 0.3},
+    {"name": "tournament_k",    "type": "int",   "min": 2,     "max": 6},
+    {"name": "patience",        "type": "int",   "min": 0,     "max": 10}
+  ],
+
+  "hungarian": [
+    {"name": "noise_std",       "type": "float", "min": 0.1,   "max": 3.0},
+    {"name": "B_z",             "type": "float", "min": 0.002, "max": 0.002},
+    {"name": "max_cands",       "type": "int",   "min": 5,     "max": 40},
+    {"name": "beam_size",       "type": "int",   "min": 2,     "max": 12},
+    {"name": "step_candidates", "type": "int",   "min": 1,     "max": 10},
+    {"name": "gate_multiplier", "type": "float", "min": 1.0,   "max": 5.0},
+    {"name": "gate_tighten",    "type": "float", "min": 0.0,   "max": 0.5},
+    {"name": "build_graph",     "type": "bool"}
+  ]
+}

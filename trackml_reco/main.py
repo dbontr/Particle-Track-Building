@@ -1,26 +1,56 @@
 #!/usr/bin/env python3
-"""
-TrackML: Refactored track building runner.
+r"""
+TrackML track building runner (headless-safe, fast I/O, optimization-aware).
 
-This script loads a TrackML event, constructs geometric layer surfaces,
-configures a chosen branching strategy, builds tracks (optionally in
-parallel/collaborative mode), visualizes results, and evaluates against truth.
+This script loads a TrackML event, constructs simple geometric **layer surfaces**
+(disks/cylinders), configures one of several EKF-based branchers, builds tracks
+(optionally in collaborative parallel mode), visualizes results (when enabled),
+and evaluates against truth with the official TrackML score.
+
+Mathematical conventions
+------------------------
+Hit positions are in meters, with coordinates :math:`(x,y,z)`. For a layer's hit
+cloud :math:`\{q_j\}`, we define
+
+- mean axial location :math:`\bar z = \frac{1}{N}\sum_j z_j`,
+- transverse radii :math:`r_j=\sqrt{x_j^2+y_j^2}`, :math:`\bar r=\frac{1}{N}\sum_j r_j`,
+- spans :math:`\Delta z = \max z_j - \min z_j`, :math:`\Delta r = \max r_j - \min r_j`.
+
+A layer is treated as a **disk** (plane) if :math:`\Delta z < 0.1\,\Delta r`,
+with plane normal :math:`n=(0,0,1)` and a point on the plane :math:`p=(0,0,\bar z)`.
+Otherwise it is modeled as a **cylinder** of radius :math:`R=\bar r`.
+
+The event score is the standard TrackML metric; per-track auxiliary metrics
+(MSE, recall/precision/F1) are optionally reported for the top tracks.
+
+CLI overview
+------------
+See :func:`build_parser` for all options. Typical usage:
+
+.. code-block:: bash
+
+   python run.py -f train_1.zip -b ekf --parallel --plot
+   python run.py -f train_1.zip -b astar --optimize --opt-space param_space.json
+
+The optimization mode performs parameter search for the selected brancher and
+can optionally use the collaborative parallel builder to speed up evaluations.
 """
 
 from __future__ import annotations
 
 import argparse
+import copy
 import json
 import logging
+import os
 from pathlib import Path
-from typing import Dict, Iterable, List, Mapping, MutableMapping, Optional, Tuple
+from typing import Dict, List, Mapping, MutableMapping, Optional, Tuple
 
-import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 from trackml.score import score_event
 
-# Branchers
+# Branchers (pure compute — safe to import early)
 from trackml_reco.branchers.ekf import HelixEKFBrancher
 from trackml_reco.branchers.astar import HelixEKFAStarBrancher
 from trackml_reco.branchers.aco import HelixEKFACOBrancher
@@ -33,10 +63,19 @@ from trackml_reco.branchers.hungarian import HelixEKFHungarianBrancher
 from trackml_reco.track_builder import TrackBuilder
 from trackml_reco.parallel_track_builder import CollaborativeParallelTrackBuilder
 
-# Local modules
+# Local modules (compute-only; plotting imported lazily)
 import trackml_reco.data as trk_data
-import trackml_reco.plotting as trk_plot
 import trackml_reco.metrics as trk_metrics
+from trackml_reco.profiling import prof
+
+# Optimizer (imported here to keep main self-contained)
+from trackml_reco.optimize import optimize_brancher  # <- new
+
+try:
+    import orjson as _orjson
+except Exception:  # pragma: no cover
+    _orjson = None
+
 
 BRANCHER_KEYS: Tuple[str, ...] = ("ekf", "astar", "aco", "pso", "sa", "ga", "hungarian")
 BRANCHER_MAP = {
@@ -49,122 +88,103 @@ BRANCHER_MAP = {
     "hungarian": HelixEKFHungarianBrancher,
 }
 
+
 def build_parser() -> argparse.ArgumentParser:
     r"""
-    Create the CLI argument parser for the TrackML track-building runner.
-
-    The parser exposes controls for input files, transverse-momentum threshold
-    :math:`p_T`, brancher selection, plotting, parallel mode, and config paths.
+    Construct the command-line interface for the TrackML runner.
 
     Returns
     -------
     argparse.ArgumentParser
-        Configured parser with the following options (abridged):
+        Parser with options for input data, plotting, branching strategy,
+        profiling, and optional parameter optimization.
 
-        - ``-f/--file``: input TrackML ``.zip`` event (default: ``train_1.zip``)
-        - ``-p/--pt``: minimum \(p_T\) in GeV (default: ``2.0``)
-        - ``-d/--debug-n``: limit number of seeds (default: ``None``)
-        - ``--plot / --no-plot``: enable/disable plotting (default: enabled)
-        - ``--extra-plots``: show extra presentation plots (default: disabled)
-        - ``--parallel``: collaborative parallel builder (default: disabled)
-        - ``-b/--brancher``: one of ``{'ekf','astar','aco','pso','sa','ga','hungarian'}``
-        - ``--config``: JSON config path (default: ``config.json``)
-        - ``-v/--verbose``: verbose logging
+    Notes
+    -----
+    Key options:
+
+    - ``--file``: input TrackML ``.zip`` event.
+    - ``--pt``: :math:`p_T` (GeV) threshold used during preprocessing.
+    - ``--brancher``: choice among ``{"ekf","astar","aco","pso","sa","ga","hungarian"}``.
+    - ``--parallel``: enable collaborative parallel builder.
+    - ``--plot``/``--no-plot``/``--extra-plots``: headless-safe plotting control.
+    - Optimization block (``--opt-*``) enables parameter search via
+      :func:`trackml_reco.optimize.optimize_brancher`. See that function for the
+      precise meaning of ``--opt-metric``, search backend selection, and history output.
     """
-    p = argparse.ArgumentParser(
-        description="Run refactored track building on a TrackML event."
-    )
-    p.add_argument(
-        "-f",
-        "--file",
-        type=str,
-        default="train_1.zip",
-        help="Input TrackML .zip event (default: train_1.zip).",
-    )
-    p.add_argument(
-        "-p",
-        "--pt",
-        type=float,
-        default=2.0,
-        help="Minimum pT threshold in GeV (default: 2.0).",
-    )
-    p.add_argument(
-        "-d",
-        "--debug-n",
-        type=int,
-        default=None,
-        help="If set, only process this many seeds (default: None).",
-    )
-    p.add_argument(
-        "--plot",
-        action="store_true",
-        default=True,
-        help="Show seed/track plots (default: True).",
-    )
-    p.add_argument(
-        "--no-plot",
-        dest="plot",
-        action="store_false",
-        help="Disable plotting.",
-    )
-    p.add_argument(
-        "--extra-plots",
-        action="store_true",
-        default=False,
-        help="Display extra presentation plots (default: False).",
-    )
-    p.add_argument(
-        "--parallel",
-        action="store_true",
-        default=False,
-        help="Enable collaborative parallel track building (default: False).",
-    )
-    p.add_argument(
-        "-b",
-        "--brancher",
-        type=str,
-        choices=BRANCHER_KEYS,
-        default="ekf",
-        metavar="BRANCHER",
-        help=(
-            "Branching strategy:\n"
-            "  ekf        - Extended Kalman Filter branching\n"
-            "  astar      - A* search-based branching\n"
-            "  aco        - Ant Colony Optimization-based branching\n"
-            "  pso        - Particle Swarm Optimization-based branching\n"
-            "  sa         - Simulated Annealing-based branching\n"
-            "  ga         - Genetic Algorithm-based branching\n"
-            "  hungarian  - Hungarian assignment for hit-to-track\n"
-            "(default: ekf)"
-        ),
-    )
-    p.add_argument(
-        "--config",
-        type=str,
-        default="config.json",
-        help="Path to JSON config with per-brancher settings (default: config.json).",
-    )
-    p.add_argument(
-        "-v",
-        "--verbose",
-        action="store_true",
-        help="Enable verbose logging."
-    )
+    p = argparse.ArgumentParser(description="Run refactored track building on a TrackML event.")
+    p.add_argument("-f", "--file", type=str, default="train_1.zip",
+                   help="Input TrackML .zip event (default: train_1.zip).")
+    p.add_argument("-p", "--pt", type=float, default=2.0,
+                   help="Minimum pT threshold in GeV (default: 2.0).")
+    p.add_argument("-d", "--debug-n", type=int, default=None,
+                   help="If set, only process this many seeds (default: None).")
+    p.add_argument("--plot", action="store_true", default=False,
+                   help="Show seed/track plots (default: True).")
+    p.add_argument("--no-plot", dest="plot", action="store_false",
+                   help="Disable plotting.")
+    p.add_argument("--extra-plots", action="store_true", default=False,
+                   help="Display extra presentation plots (default: False).")
+    p.add_argument("--parallel", action="store_true", default=True,
+                   help="Enable collaborative parallel track building (default: False).")
+    p.add_argument("-b", "--brancher", type=str, choices=BRANCHER_KEYS, default="ekf",
+                   metavar="BRANCHER",
+                   help="Branching strategy: ekf | astar | aco | pso | sa | ga | hungarian (default: ekf)")
+    p.add_argument("--config", type=str, default="config.json",
+                   help="Path to JSON config with per-brancher settings (default: config.json).")
+    p.add_argument("--profile", action="store_true", default=False,
+                   help="Enable cProfile around the build+score phase.")
+    p.add_argument("--profile-out", type=str, default=None, 
+                   help="If set, write pstats text to this file.")
+    p.add_argument("-v", "--verbose", action="store_true",
+                   help="Enable verbose logging.")
+    p.add_argument("--optimize", action="store_true", default=True,
+                   help="Run parameter optimization for the selected brancher instead of a single build.")
+    p.add_argument("--opt-metric", type=str, default="mse",
+                   help="Objective metric to minimize (e.g., mse, rmse, recall, precision, f1, pct_hits, score).")
+    p.add_argument("--opt-iterations", type=int, default=250,
+                   help="Number of optimization iterations (default: 40).")
+    p.add_argument("--opt-n-init", type=int, default=10,
+                   help="Number of initial random points for Bayesian search (default: 10).")
+    p.add_argument("--opt-space", type=str, default="param_space.json",
+                   help="Path to parameter space JSON.")
+    p.add_argument("--opt-max-seeds", type=int, default=200,
+                   help="Limit seeds per evaluation to speed up optimization (default: 200).")
+    p.add_argument("--opt-parallel", action="store_true", default=False,
+                   help="Use CollaborativeParallelTrackBuilder during optimization.")
+    p.add_argument("--opt-parallel-time-budget", type=float, default=None,
+                   help="Optional per-seed time budget (seconds) if --opt-parallel.")
+    p.add_argument("--opt-seed", type=int, default=None,
+                   help="Random seed for the optimizer.")
+    p.add_argument("--opt-out", type=str, default=None,
+                   help="If set, write best-tuned full config JSON to this path.")
+    p.add_argument("--opt-history", type=str, default=None,
+                   help="If set, write a CSV of trial history to this path.")
+    p.add_argument("--opt-skopt-kind", type=str, default="forest",
+                   choices=("auto", "gp", "forest", "gbrt", "random"),
+                   help="Which skopt backend to use if available (default: auto).")
+    p.add_argument("--opt-aggregator", type=str, default="mean",
+                   choices=("mean", "median", "min", "max"),
+                   help="Aggregator for per-track metrics during optimization (default: mean).")
+    p.add_argument("--opt-n-best-tracks", type=int, default=0,
+                   help="If >0, aggregate metric over the best N tracks; 0 uses ALL tracks (default: 0).")
+    p.add_argument("--opt-tol", type=float, default=0.005,
+                   help="Hit-matching tolerance for efficiency metrics (default: 0.005).")
     return p
 
 
 def setup_logging(verbose: bool = False) -> None:
     r"""
-    Configure Python logging for the runner.
+    Configure process-wide logging.
 
     Parameters
     ----------
     verbose : bool, optional
-        If ``True``, set level to ``DEBUG``; otherwise ``INFO``. Default ``False``.
+        If ``True``, set level to ``DEBUG``; otherwise ``INFO``.
 
-    Returns
-    -------
-    None
+    Notes
+    -----
+    Format is ``'%(asctime)s | %(levelname)-8s | %(message)s'`` with ``%H:%M:%S`` timestamps.
     """
     level = logging.DEBUG if verbose else logging.INFO
     logging.basicConfig(
@@ -173,122 +193,139 @@ def setup_logging(verbose: bool = False) -> None:
         datefmt="%H:%M:%S",
     )
 
-def compute_layer_surfaces(hits: pd.DataFrame) -> Dict[Tuple[int, int], Mapping[str, float | np.ndarray]]:
-    r"""
-    Infer simple **disk** or **cylinder** surfaces per layer ``(volume_id, layer_id)``.
 
-    For each layer, we compare the axial spread :math:`\Delta z` versus the radial
-    spread :math:`\Delta r`. If :math:`\Delta z < 0.1\,\Delta r`, we classify as a
-    disk at :math:`z \approx \bar{z}`; otherwise as a cylinder at radius
-    :math:`R \approx \bar{r}` where :math:`r=\sqrt{x^2+y^2}`.
+def apply_plotting_guard(enable_plots: bool) -> None:
+    r"""
+    Enforce a **headless-safe** Matplotlib configuration when plotting is disabled.
+
+    Must be called **before** importing any module that might import
+    :mod:`matplotlib.pyplot`.
 
     Parameters
     ----------
-    hits : pd.DataFrame
-        Hit table with at least columns
-        ``['x', 'y', 'z', 'volume_id', 'layer_id']``.
+    enable_plots : bool
+        If ``False``, set backend to ``'Agg'`` (non-interactive), turn off
+        interactive mode, and neutralize ``plt.show()``.
+    """
+    if enable_plots:
+        return
+    os.environ.setdefault("MPLBACKEND", "Agg")
+    # Delay importing matplotlib until now to enforce backend
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    # Hard-disable interactive mode / show()
+    import matplotlib.pyplot as _plt  # noqa: WPS433 (local import intentional)
+    _plt.ioff()
+    _plt.show = lambda *a, **k: None  # type: ignore[assignment]
+
+
+def compute_layer_surfaces(hits: pd.DataFrame) -> Dict[Tuple[int, int], Mapping[str, float | np.ndarray]]:
+    r"""
+    Infer simple **disk/cylinder** surfaces for each ``(volume_id, layer_id)``.
+
+    For each layer, compute spans :math:`\Delta z` and :math:`\Delta r` and apply
+
+    .. math::
+
+        \text{disk if}\quad \Delta z < 0.1\,\Delta r,\qquad
+        \text{else cylinder}.
+
+    Disk parameters are :math:`n=(0,0,1)` and :math:`p=(0,0,\bar z)`. Cylinder
+    radius is :math:`R=\bar r`.
+
+    Parameters
+    ----------
+    hits : pandas.DataFrame
+        Must contain columns ``x,y,z,volume_id,layer_id``.
 
     Returns
     -------
-    dict
-        Mapping ``(volume_id, layer_id) → surface``:
-        - Disk: ``{'type': 'disk', 'n': [0,0,1], 'p': [0,0, z_mean]}``
-        - Cylinder: ``{'type': 'cylinder', 'R': mean_radius}``
+    dict[(int,int) -> dict]
+        Each value is either ``{'type':'disk','n':(3,), 'p':(3,)}`` or
+        ``{'type':'cylinder','R': float}``.
 
     Notes
     -----
-    This heuristic is intentionally lightweight and robust for building
-    first-order geometric constraints for propagation.
+    This **coarse** geometric model is adequate for gating and surface-to-surface
+    propagation in the branchers; it does not attempt to model detector thickness
+    or segmentation.
     """
-    layer_keys = sorted(set(zip(hits.volume_id, hits.layer_id)), key=lambda x: (x[0], x[1]))
     surfaces: Dict[Tuple[int, int], Mapping[str, float | np.ndarray]] = {}
-
-    for vol, lay in layer_keys:
-        df = hits[(hits.volume_id == vol) & (hits.layer_id == lay)]
+    for (vol, lay), df in hits.groupby(["volume_id", "layer_id"], sort=False):
         if df.empty:
             continue
+        z_vals = df["z"].to_numpy()
+        z_span = float(z_vals.max() - z_vals.min())
 
-        z_span = float(df.z.max() - df.z.min())
-        r_vals = np.sqrt(df.x.values ** 2 + df.y.values ** 2)
-        r_span = float(r_vals.max() - r_vals.min())
+        x = df["x"].to_numpy()
+        y = df["y"].to_numpy()
+        r = np.hypot(x, y)
+        r_span = float(r.max() - r.min())
 
         if z_span < 0.1 * r_span:
-            # Disk-like
             surfaces[(vol, lay)] = {
                 "type": "disk",
                 "n": np.array([0.0, 0.0, 1.0]),
-                "p": np.array([0.0, 0.0, float(df.z.mean())]),
+                "p": np.array([0.0, 0.0, float(z_vals.mean())]),
             }
         else:
-            # Cylinder-like
             surfaces[(vol, lay)] = {
                 "type": "cylinder",
-                "R": float(r_vals.mean()),
+                "R": float(r.mean()),
             }
-
     return surfaces
 
 
 def load_config(config_path: Path) -> MutableMapping[str, dict]:
     r"""
-    Load a JSON configuration file for brancher settings.
+    Load a JSON configuration with optional :mod:`orjson` acceleration.
 
     Parameters
     ----------
     config_path : pathlib.Path
-        Path to a JSON file, e.g., containing keys like
-        ``'ekf_config'``, ``'ekfastar_config'``, etc.
+        Path to the JSON file.
 
     Returns
     -------
     dict
-        Parsed JSON object (dict-like).
+        Parsed configuration.
 
     Raises
     ------
-    FileNotFoundError
-        If ``config_path`` does not exist.
     ValueError
-        If the file cannot be parsed as valid JSON.
+        If the file cannot be parsed.
     """
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config file not found: {config_path}")
-
     try:
-        with config_path.open("r") as f:
-            cfg = json.load(f)
-    except json.JSONDecodeError as e:
+        if _orjson is not None:
+            return _orjson.loads(config_path.read_bytes())
+        with config_path.open("r", encoding="utf-8") as f:
+            return json.load(f)
+    except Exception as e:  # pragma: no cover
         raise ValueError(f"Failed to parse {config_path}: {e}") from e
-    return cfg
 
 
 def inject_layer_surfaces_into_configs(
     cfg: MutableMapping[str, dict],
     surfaces: Mapping[Tuple[int, int], Mapping[str, float | np.ndarray]],
-    ) -> None:
+) -> None:
     r"""
-    Attach ``layer_surfaces`` into any known brancher config blocks that exist.
+    Attach ``layer_surfaces`` into any present brancher configuration blocks.
 
     Parameters
     ----------
-    cfg : mutable mapping
-        Parsed configuration (dict-like) that may include
-        ``'ekf_config'``, ``'ekfastar_config'``, ``'ekfaco_config'``,
-        ``'ekfpso_config'``, ``'ekfsa_config'``, ``'ekfga_config'``,
-        ``'ekfhungarian_config'``.
+    cfg : dict
+        Global configuration dictionary (possibly containing multiple brancher blocks).
     surfaces : mapping
-        Output of :func:`compute_layer_surfaces`, mapping
-        ``(volume_id, layer_id)`` → surface dict.
-
-    Returns
-    -------
-    None
+        Output of :func:`compute_layer_surfaces`.
 
     Notes
     -----
-    The function is idempotent: missing keys are skipped with a warning.
+    The following keys are recognized and updated in place if present:
+
+    ``"ekf_config"``, ``"ekfastar_config"``, ``"ekfaco_config"``,
+    ``"ekfpso_config"``, ``"ekfsa_config"``, ``"ekfga_config"``, ``"ekfhungarian_config"``.
     """
-    candidate_keys = [
+    for key in (
         "ekf_config",
         "ekfastar_config",
         "ekfaco_config",
@@ -296,72 +333,95 @@ def inject_layer_surfaces_into_configs(
         "ekfsa_config",
         "ekfga_config",
         "ekfhungarian_config",
-    ]
-    attached = []
-    for k in candidate_keys:
-        if k in cfg and isinstance(cfg[k], dict):
-            cfg[k]["layer_surfaces"] = surfaces
-            attached.append(k)
-
-    if not attached:
-        logging.warning("No known brancher config keys found to attach layer surfaces.")
+    ):
+        block = cfg.get(key)
+        if isinstance(block, dict):
+            block["layer_surfaces"] = surfaces
 
 
 def resolve_brancher_config_key(brancher: str) -> str:
     r"""
-    Map a brancher short name to its JSON configuration key.
+    Map a brancher name to its configuration block key.
 
     Parameters
     ----------
-    brancher : str
-        One of ``{'ekf','astar','aco','pso','sa','ga','hungarian'}``.
+    brancher : {"ekf","astar","aco","pso","sa","ga","hungarian"}
 
     Returns
     -------
     str
-        Configuration key, e.g.:
-        ``'ekf' → 'ekf_config'``, ``'ga' → 'ekfga_config'``.
-
-    Examples
-    --------
-    >>> resolve_brancher_config_key('ekf')
-    'ekf_config'
-    >>> resolve_brancher_config_key('hungarian')
-    'ekfhungarian_config'
+        e.g. ``"ekf_config"`` for ``"ekf"``, or ``"ekf{brancher}_config"`` otherwise.
     """
     return "ekf_config" if brancher == "ekf" else f"ekf{brancher}_config"
 
 
-def main() -> None:
+def _deep_update(d: dict, u: dict) -> dict:
     r"""
-    CLI entry point for TrackML track building.
+    Recursively merge dictionaries (without side effects).
 
-    Workflow
-    --------
-    1. Parse CLI arguments and configure logging.
-    2. Load and preprocess the event; obtain :math:`p_T`-filtered hits.
-    3. Infer layer surfaces (disk/cylinder) from hit geometry.
-    4. Load JSON config and inject ``layer_surfaces`` where relevant.
-    5. Instantiate the chosen brancher (EKF/A*/ACO/PSO/SA/GA/Hungarian).
-    6. Build tracks (optionally collaborative/parallel).
-    7. Plot seeds and (optionally) top tracks.
-    8. Compute statistics and score against truth with :func:`trackml.score.score_event`.
+    Parameters
+    ----------
+    d : dict
+        Base dictionary.
+    u : dict
+        Overrides (recursively merged).
 
     Returns
     -------
-    None
+    dict
+        New dictionary where nested dicts are merged and scalars/containers from
+        ``u`` replace those in ``d``.
+    """
+    out = dict(d)
+    for k, v in u.items():
+        if isinstance(v, dict) and isinstance(out.get(k), dict):
+            out[k] = _deep_update(out[k], v)
+        else:
+            out[k] = v
+    return out
+
+
+def main() -> None:
+    r"""
+    End-to-end TrackML pipeline: **load → preprocess → geometry → branch → build → score**.
+
+    Pipeline
+    --------
+    1. Parse CLI (:func:`build_parser`) and set up logging (:func:`setup_logging`).
+    2. Enforce headless plotting guard (:func:`apply_plotting_guard`).
+    3. Load & preprocess data (:func:`trackml_reco.data.load_and_preprocess`).
+    4. Build per-layer surfaces (:func:`compute_layer_surfaces`) and optionally plot.
+    5. Load config (:func:`load_config`), inject surfaces into brancher blocks.
+    6. **Two operating modes**:
+
+       - **Optimization mode** (``--optimize``): run
+         :func:`trackml_reco.optimize.optimize_brancher` over a parameter space;
+         optionally write best config and trial history.
+       - **Build mode**: instantiate the requested brancher and builder
+         (parallel or single-process) and construct tracks.
+
+    7. Optionally plot seeds / top tracks, then evaluate top tracks with
+       :func:`trackml.score.score_event` and auxiliary metrics.
 
     Notes
     -----
-    * The score is computed from the deduplicated submission mapping
-      ``{'hit_id' → 'track_id'}`` built from the best tracks.
-    * When ``--parallel`` is set, the
-      :class:`~trackml_reco.parallel_track_builder.CollaborativeParallelTrackBuilder`
-      is used instead of the default :class:`~trackml_reco.track_builder.TrackBuilder`.
+    - The **collaborative parallel builder** shares a hit pool across workers so
+      that reservations can be coordinated; this improves wall-clock without
+      changing model semantics.
+    - The event score is reported on a deduplicated submission built from the
+      best tracks; auxiliary metrics (MSE, recall/precision/F1) are logged for
+      the top :math:`N` tracks for quick quality feedback.
+
+    See Also
+    --------
+    trackml_reco.branchers : EKF branchers and search strategies.
+    trackml_reco.optimize.optimize_brancher : Parameter search driver.
     """
     parser = build_parser()
     args = parser.parse_args()
     setup_logging(args.verbose)
+
+    apply_plotting_guard(args.plot or args.extra_plots)
 
     logging.info("Loading & preprocessing data...")
     hit_pool = trk_data.load_and_preprocess(args.file, pt_threshold=args.pt)
@@ -370,7 +430,10 @@ def main() -> None:
     logging.info("Inferring layer surfaces...")
     layer_surfaces = compute_layer_surfaces(hits)
 
-    trk_plot.plot_extras(hits, pt_cut_hits, enabled=args.extra_plots)
+    # Lazy import plotting only if needed (prevents accidental pyplot usage)
+    if args.plot or args.extra_plots:
+        import trackml_reco.plotting as trk_plot  # noqa: WPS433
+        trk_plot.plot_extras(hits, pt_cut_hits, enabled=args.extra_plots)
 
     # Load config
     cfg_path = Path(args.config)
@@ -391,6 +454,63 @@ def main() -> None:
             f"Available keys: {', '.join(config.keys())}"
         )
 
+    if args.optimize:
+        # hard-disable any plotting during optimization
+        plots_prev = (args.plot, args.extra_plots)
+        args.plot, args.extra_plots = False, False
+        apply_plotting_guard(False)
+
+        logging.info("=== Optimization mode ON ===")
+        logging.info("Brancher: %s  |  Metric: %s", brancher_key, args.opt_metric)
+
+        result = optimize_brancher(
+            hit_pool=hit_pool,
+            base_config=config,
+            brancher_key=brancher_key,
+            space_path=Path(args.opt_space),
+            metric=args.opt_metric,
+            iterations=args.opt_iterations,
+            n_init=args.opt_n_init,
+            use_parallel=args.opt_parallel,
+            parallel_time_budget=args.opt_parallel_time_budget,
+            max_seeds=args.opt_max_seeds,
+            rng_seed=args.opt_seed,
+            skopt_kind=args.opt_skopt_kind,
+            aggregator=args.opt_aggregator,
+            n_best_tracks=args.opt_n_best_tracks,
+            tol=args.opt_tol,
+        )
+
+        logging.info("Best objective (lower is better): %.6f", result.best_value)
+        logging.info("Best params: %s", result.best_params)
+
+        # write best full-config if requested
+        if args.opt_out:
+            out_cfg = copy.deepcopy(config)
+            out_cfg[brancher_config_key] = _deep_update(
+                out_cfg.get(brancher_config_key, {}),
+                result.best_params
+            )
+            Path(args.opt_out).write_text(json.dumps(out_cfg, indent=2))
+            logging.info("Wrote best config to %s", args.opt_out)
+
+        # write history if requested
+        if args.opt_history:
+            rows = []
+            for h in result.history:
+                row = {"value": h["value"], "time_s": h["time_s"]}
+                # flatten params with prefix
+                for k, v in h["params"].items():
+                    row[f"p::{k}"] = v
+                rows.append(row)
+            pd.DataFrame(rows).to_csv(args.opt_history, index=False)
+            logging.info("Wrote optimization history to %s", args.opt_history)
+
+        # restore flags and exit (skip normal build)
+        args.plot, args.extra_plots = plots_prev
+        return
+
+    # Choose builder
     builder_cls = CollaborativeParallelTrackBuilder if args.parallel else TrackBuilder
     logging.info(
         "Building with brancher=%s (%s), parallel=%s",
@@ -398,22 +518,31 @@ def main() -> None:
         brancher_cls.__name__,
         args.parallel,
     )
+    brancher_cfg = dict(config[brancher_config_key])  # copy; we may read defaults
+    # sensible fallbacks if ekf_config carries global knobs used by CLI
+    ekf_defaults = config.get("ekf_config", {})
+    num_branches = int(brancher_cfg.get("num_branches", ekf_defaults.get("num_branches", 30)))
+    survive_top = int(brancher_cfg.get("survive_top", ekf_defaults.get("survive_top", 12)))
+
     track_builder = builder_cls(
         hit_pool=hit_pool,
         brancher_cls=brancher_cls,
-        brancher_config=config[brancher_config_key],
+        brancher_config=brancher_cfg,
     )
 
     # Build tracks
-    logging.info("Building seeds & tracks from truth hits...")
-    completed_tracks = track_builder.build_tracks_from_truth(
-        max_seeds=args.debug_n,
-        max_tracks_per_seed=config["ekf_config"]["num_branches"],  # matches original behavior
-        max_branches=config["ekf_config"]["survive_top"],
-    )
+    with prof(args.profile, out_path=args.profile_out):
+        logging.info("Building seeds & tracks from truth hits...")
+        completed_tracks = track_builder.build_tracks_from_truth(
+            max_seeds=args.debug_n,
+            max_tracks_per_seed=num_branches,
+            max_branches=survive_top,
+        )
 
-    # Seed plots
-    trk_plot.plot_seeds(track_builder, show=args.plot, max_seeds=args.debug_n)
+    # Seed plots (lazy-import plotting)
+    if args.plot:
+        import trackml_reco.plotting as trk_plot  # noqa: WPS433
+        trk_plot.plot_seeds(track_builder, show=True, max_seeds=args.debug_n)
 
     # Stats
     stats = track_builder.get_track_statistics()
@@ -435,21 +564,30 @@ def main() -> None:
         if truth_particle.empty:
             continue
 
-        traj = np.asarray(track.trajectory)
-        truth_xyz = truth_particle[["x", "y", "z"]].values
+        traj = np.asarray(track.trajectory, dtype=float)
+        truth_xyz = truth_particle[["x", "y", "z"]].to_numpy(dtype=float, copy=False)
 
-        mse = trk_metrics.branch_mse({"traj": traj}, truth_xyz)
-        pct_hits, _ = trk_metrics.branch_hit_stats({"traj": traj}, truth_xyz)
-        mses.append(float(mse))
-        pct_hits_list.append(float(pct_hits))
+        # compute only what you’ll log/aggregate; add/remove names freely
+        m = trk_metrics.compute_metrics(
+            traj, truth_xyz, tol=0.005,
+            names=("mse", "recall", "precision", "f1")
+        )
+        mse, recall, precision, f1 = trk_metrics.unpack(m, "mse", "recall", "precision", "f1")
 
-        logging.info("Track %d (PID=%s): MSE=%.3f, %%hits=%.1f%%",
-                     i, track.particle_id, mse, pct_hits)
+        mses.append(mse)
+        pct_hits_list.append(recall)  # recall (%) == your “% hits”
+
+        logging.info(
+            "Track %d (PID=%s): MSE=%.3f | recall=%.1f%% | precision=%.1f%% | F1=%.1f%%",
+            i, track.particle_id, mse, recall, precision, f1
+        )
+
 
         for hid in track.hit_ids:
             submission_rows.append({"hit_id": int(hid), "track_id": int(track.particle_id)})
 
         if args.plot and i <= 3:
+            import trackml_reco.plotting as trk_plot  # noqa: WPS433
             trk_plot.plot_best_track_3d(track_builder, track, truth_particle, i)
 
     if not submission_rows:

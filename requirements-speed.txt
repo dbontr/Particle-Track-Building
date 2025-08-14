@@ -1,0 +1,5 @@
+-r requirements.txt
+
+# Speed & profiling extras
+scalene>=1.5.49; platform_system != 'Windows'
+py-spy>=0.3.14

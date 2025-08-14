@@ -3,7 +3,10 @@ trackml @ git+https://github.com/LAL/trackml-library.git@master
 
 # Runtime dependencies
 numpy
+numba
 pandas
 matplotlib
 scipy
 networkx
+orjson
+scikit-optimize

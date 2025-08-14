@@ -63,7 +63,12 @@
     "max_cands": 10,
     "step_candidates": 5,
     "gate_multiplier": 3.0,
+    "gate_quantile": 0.997,
     "epsilon_greedy": 0.1,
+    "eps_min": 0.02,
+    "temp0": 0.6,
+    "temp_min": 0.05,
+    "v_clamp": 1.5,
     "patience": 3,
     "rng_seed": null
   },

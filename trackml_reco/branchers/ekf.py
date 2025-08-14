@@ -1,63 +1,122 @@
-import numpy as np
+import heapq
 from typing import Tuple, Dict, List, Optional, Any, Sequence
-import matplotlib.pyplot as plt
+import numpy as np
 import networkx as nx
 from scipy.spatial import cKDTree
-from numpy.linalg import solve
+
 from trackml_reco.branchers.brancher import Brancher
+from trackml_reco.ekf_kernels import kalman_gain
+
 
 class HelixEKFBrancher(Brancher):
     r"""
-    Branching EKF track finder with beam pruning.
+    High-performance branching EKF track finder (beam search, vectorized updates).
 
-    At each layer, every active branch is propagated by an EKF to the layer
-    surface. Candidates within a gating radius are scored by Mahalanobis
-    :math:`\chi^2`, each branch fans out to its top-K local candidates, and
-    then global beam pruning keeps only a fixed number of best branches.
+    This brancher performs a **beam search** across ordered detector layers while
+    propagating a 7-D helical state with an Extended Kalman Filter (EKF). At each
+    layer, candidates are produced by χ² gating of KD-tree neighbors
+    (:meth:`Brancher._layer_topk_candidates`). A **single** EKF gain
+    :math:`\mathbf{K}` is computed per *(branch, layer)* and reused to update all
+    candidates vectorized:
 
-    This yields a fast, robust search with a predictable branching width.
+    .. math::
+
+        \mathbf{x}^+_j &= \hat{\mathbf{x}} + \mathbf{K}\,\mathbf{r}_j,
+        \quad \mathbf{r}_j = \mathbf{z}_j - \hat{\mathbf{x}}_{0:3}, \\
+        \mathbf{P}^+     &\approx (\mathbf{I}-\mathbf{K}\mathbf{H})\,\mathbf{P}^-,
+        \quad \forall j \in \text{candidates at layer } \ell,
+
+    where :math:`\mathbf{H}\in\mathbb{R}^{3\times 7}` extracts position and
+    :math:`\mathbf{K}` is computed via a Cholesky solve (no inverses). The branch
+    score :math:`g` accumulates per-step χ² (plus any deny penalties).
+
+    Key optimizations
+    -----------------
+    - **One :math:`\mathbf{K}` per branch+layer:** compute EKF gain once; update all
+      candidates with a single matrix multiply.
+    - **KD-gating + χ²** via :meth:`Brancher._layer_topk_candidates`
+      (fast Cholesky χ² + optional deny policy).
+    - **Argpartition** for local Top-K and global beam pruning (linear-time select).
+    - **Allocation hygiene:** cached :math:`\mathbf{H}`/:math:`\mathbf{I}`, dtype tracking,
+      minimal temporaries.
+    - **Sparse graph option:** only *surviving* branches record edges.
+    - **Deny-list** supported (per call and/or persistent via :meth:`Brancher.set_deny_hits`).
 
     Parameters
     ----------
-    trees : dict[(int, int), tuple(cKDTree, ndarray, ndarray)]
-        Mapping ``(volume_id, layer_id) → (KD-tree, points, hit_ids)`` where
-        ``points`` has shape ``(N, 3)`` and ``hit_ids`` has shape ``(N,)``.
-    layer_surfaces : dict[(int, int), dict]
-        Geometry per layer. One of
-
-        * ``{'type': 'disk', 'n': n, 'p': p}``  (plane normal and point), or
-        * ``{'type': 'cylinder', 'R': R}``      (cylindrical radius).
+    trees : dict[tuple[int, int], tuple(cKDTree, ndarray, ndarray)]
+        Mapping ``(volume_id, layer_id) -> (tree, points, ids)`` where
+        ``points`` has shape ``(N,3)`` and ``ids`` is aligned of shape ``(N,)``.
+    layer_surfaces : dict[tuple[int, int], dict]
+        Geometry per layer. Each value is either
+        ``{'type':'disk','n':(3,), 'p':(3,)}`` or ``{'type':'cylinder','R': float}``.
     noise_std : float, optional
-        Isotropic measurement std (meters). Sets :math:`R=\sigma^2 I_3`.
-        Default is ``2.0``.
+        Isotropic measurement std (meters); sets :math:`\mathbf{R}=\sigma^2\mathbf{I}_3`.
+        Default ``2.0``.
     B_z : float, optional
-        Magnetic field along +z (Tesla). Affects
-        :math:`\omega = B_z\,\kappa\,p_T`. Default ``0.002``.
+        Longitudinal field (Tesla), influences
+        :math:`\omega = B_z\,\kappa\,p_T`, with :math:`p_T=\sqrt{v_x^2+v_y^2}`.
+        Default ``0.002``.
     num_branches : int, optional
-        Beam width after each layer (max branches kept). Default ``30``.
+        Beam width retained after each layer (total survivors). Default ``30``.
     survive_top : int, optional
-        Number of elite branches kept deterministically each layer. Default ``12``.
-        The remaining ``num_branches - survive_top`` are sampled from the rest.
+        Deterministic elites per layer (lowest scores); the remainder are sampled
+        uniformly for diversity. Default ``12``.
     max_cands : int, optional
-        Upper bound passed to KD queries (base class). Default ``10``.
+        KD-tree preselect bound (forwarded to base). Default ``10``.
     step_candidates : int, optional
-        Per-branch top-K candidates expanded per layer. Default ``5``.
+        Local Top-K per branch per layer (post-gate). Default ``5``.
     gate_multiplier : float, optional
-        Base gate radius
-        :math:`r = \text{gate\_multiplier}\,\sqrt{\operatorname{trace}(S)/3}`.
-        Default ``3.0``.
+        Base gate radius scale, combined with covariance via a trace heuristic and
+        tapered by depth (see :meth:`_gate_radius_depth`). Default ``3.0``.
     gate_tighten : float, optional
-        Linear gate tightening along depth:
-        :math:`r \leftarrow r \cdot \max\!\bigl(0.5,\, 1 - \text{gate\_tighten}\cdot \text{depth\_frac}\bigr)`.
-        Default ``0.15``.
+        Linear taper factor along depth :math:`d\in[0,1]`. Default ``0.15``.
     build_graph : bool, optional
-        If ``True``, record a sparse debug graph of chosen edges. Default ``False``.
+        If ``True``, record edges for *surviving* branches only (sparse graph).
+        Default ``False``.
+
+    Attributes
+    ----------
+    layer_surfaces : dict
+        Cached geometry per layer.
+    num_branches : int
+        Beam width retained after each layer.
+    survive_top : int
+        Number of elites deterministically kept each layer.
+    step_candidates : int
+        Max candidates kept per branch per layer after gating.
+    gate_multiplier, gate_tighten : float
+        Gate radius controls; see :meth:`_gate_radius_depth`.
+    build_graph : bool
+        Whether to build the sparse survivor graph during :meth:`run`.
+    _I, _H : ndarray
+        Cached identity and measurement Jacobian.
+    _rng : numpy.random.Generator
+        RNG for diversity sampling.
+    _dtype : numpy dtype
+        Numeric dtype inferred from layer points.
+
+    See Also
+    --------
+    :class:`Brancher` : EKF, gating, deny policy, geometry utils.
+    :class:`HelixEKFAStarBrancher` : A* with physics penalties.
+    :class:`HelixEKFACOBrancher` : Ant Colony Optimization variant.
 
     Notes
     -----
-    * Each branch's ``traj`` stores the **measured hit positions** it used.
-    * Passing ``deny_hits`` to :meth:`run` excludes those hits from consideration.
+    - Gating and χ² are delegated to :meth:`Brancher._layer_topk_candidates`,
+      which uses a Cholesky solve under the hood (no inverses).
+    - The covariance update uses :math:`(\mathbf{I}-\mathbf{K}\mathbf{H})\mathbf{P}^-`
+      (Joseph form omitted for speed given Cholesky stability).
+    - Deny lists may be supplied per call (``deny_hits=...``) or configured
+      persistently via :meth:`Brancher.set_deny_hits`.
     """
+
+    __slots__ = (
+        "layer_surfaces", "num_branches", "survive_top", "step_candidates",
+        "gate_multiplier", "gate_tighten", "build_graph",
+        "_I", "_H", "_rng", "_dtype"
+    )
 
     def __init__(self,
                  trees: Dict[Tuple[int, int], Tuple[cKDTree, np.ndarray, np.ndarray]],
@@ -76,232 +135,262 @@ class HelixEKFBrancher(Brancher):
                          layers=list(layer_surfaces.keys()),
                          noise_std=noise_std,
                          B_z=B_z,
-                         max_cands=max_cands)
+                         max_cands=max_cands,
+                         step_candidates=step_candidates)
 
         self.layer_surfaces = layer_surfaces
-        self.num_branches = int(num_branches)
-        self.survive_top = int(survive_top)
+        self.num_branches   = int(num_branches)
+        self.survive_top    = int(survive_top)
         self.step_candidates = int(step_candidates)
-        self.state_dim = 7
-
-        # gating
         self.gate_multiplier = float(gate_multiplier)
-        self.gate_tighten = float(gate_tighten)
+        self.gate_tighten     = float(gate_tighten)
+        self.build_graph      = bool(build_graph)
 
-        # debug graph
-        self.build_graph = bool(build_graph)
-
-        # RNG for diversity sampling
+        self.state_dim = 7
+        self._I = np.eye(self.state_dim)
+        self._H = self.H_jac(None)               # constant 3x7 extractor
         self._rng = np.random.default_rng()
 
-    def _gate_radius_fast(self, S: np.ndarray, depth_frac: float) -> float:
-        r"""
-        Compute a fast scalar gating radius from innovation covariance.
+        # pick a consistent float dtype (from any layer's points if available)
+        try:
+            any_layer = next(iter(trees))
+            self._dtype = trees[any_layer][1].dtype
+        except Exception:
+            self._dtype = np.float64
 
-        Uses trace-based scale with mild linear tightening along depth:
+    def _gate_radius_depth(self, S: np.ndarray, depth_frac: float) -> float:
+        r"""
+        Depth-tapered trace gate.
+
+        The gate radius is computed from the innovation covariance trace and
+        linearly tightened as we progress deeper into the layer stack:
 
         .. math::
 
-            r \;=\; \text{gate\_multiplier}\,\sqrt{\tfrac{\operatorname{trace}(S)}{3}}
-            \times \max\!\bigl(0.5,\; 1 - \text{gate\_tighten}\cdot \text{depth\_frac}\bigr).
+            r_{\text{gate}}(\text{depth}) \;=\;
+            \underbrace{\text{gate\_multiplier}\,
+            \sqrt{\max(10^{-12},\tfrac{1}{3}\operatorname{tr}(\mathbf{S}))}}_{\text{trace baseline}}
+            \cdot \max\!\bigl(0.5,\; 1 - \text{gate\_tighten}\cdot \text{depth\_frac}\bigr).
 
         Parameters
         ----------
         S : ndarray, shape (3, 3)
-            Innovation covariance.
+            Innovation covariance :math:`\mathbf{S}` at the current layer.
         depth_frac : float
-            Progress through the layer sequence in :math:`[0,1]`.
+            Progress through layers in ``[0, 1]`` (start → end).
 
         Returns
         -------
         float
-            Gate radius :math:`r`.
+            Gate radius :math:`r_{\text{gate}}`.
         """
         base = self.gate_multiplier * float(np.sqrt(max(1e-12, np.trace(S) / 3.0)))
-        tighten = max(0.5, 1.0 - self.gate_tighten * depth_frac)
-        return base * tighten
+        return base * max(0.5, 1.0 - self.gate_tighten * depth_frac)
 
     def run(self,
             seed_xyz: np.ndarray,
             layers: List[Tuple[int, int]],
-            t: np.ndarray,
+            t: Optional[np.ndarray],
             plot_tree: bool = False,
             *,
-            deny_hits: Optional[Sequence[int]] = None) -> Tuple[List[Dict[str, Any]], nx.DiGraph]:
+            deny_hits: Optional[Sequence[int]] = None
+            ) -> Tuple[List[Dict[str, Any]], nx.DiGraph]:
         r"""
-        Execute branching EKF across the provided layer sequence.
+        Execute beam search with EKF propagation and χ²-based scoring.
 
-        For each active branch and layer:
-        1) predict to the layer surface, 2) compute :math:`S` and gate,
-        3) score candidates by Mahalanobis :math:`\chi^2`, 4) keep local top-K,
-        5) perform EKF update, 6) globally prune to a fixed beam.
+        Algorithm
+        ---------
+        For each surviving branch at layer :math:`\ell`:
+
+        1. **Geometric step** to the layer surface by solving for
+           :math:`\Delta t_\ell` with :meth:`Brancher._solve_dt_to_surface`.
+        2. **EKF predict** to obtain :math:`(\hat{\mathbf{x}},\mathbf{P}^-,\mathbf{S})`
+           via :meth:`Brancher._ekf_predict`.
+        3. **Gate & score** candidates with :meth:`Brancher._layer_topk_candidates`
+           to get Top-K by χ² (deny policy applied if configured).
+        4. **Single-gain updates**: compute one
+           :math:`\mathbf{K}=\texttt{kalman\_gain}(\mathbf{P}^-,\mathbf{H},\mathbf{S})`
+           and update all candidates vectorized:
+
+           .. math::
+
+               \mathbf{x}^+_j = \hat{\mathbf{x}} + \mathbf{K}(\mathbf{z}_j-\hat{\mathbf{x}}_{0:3}), \qquad
+               \mathbf{P}^+ = (\mathbf{I}-\mathbf{K}\mathbf{H})\,\mathbf{P}^-.
+
+        5. **Expand** children with local costs (χ² plus any deny penalty) added
+           to the parent's accumulated score :math:`g`.
+        6. **Beam prune**: keep ``survive_top`` deterministic elites (lowest
+           :math:`g`), then sample the remaining survivors uniformly from the rest
+           to reach ``num_branches`` for diversity.
 
         Parameters
         ----------
         seed_xyz : ndarray, shape (3, 3)
-            Three seed hit positions :math:`(x,y,z)` used to initialize the helix.
-        layers : list of tuple(int, int)
-            Ordered list of ``(volume_id, layer_id)`` to traverse.
-        t : ndarray
-            Nominal times for seed spacing (used for seed velocity/curvature).
+            Three seed points used to initialize a helix (two segments). Initial
+            velocity and curvature are estimated via
+            :meth:`Brancher._estimate_seed_helix`.
+        layers : list[tuple[int, int]]
+            Ordered layer keys to traverse.
+        t : ndarray or None
+            Optional timestamps aligned with ``seed_xyz``; if provided, the
+            initial step uses :math:`\Delta t_0 = t[1]-t[0]`, else ``1.0``.
         plot_tree : bool, optional
-            If ``True``, returns a composed graph of chosen steps.
-        deny_hits : sequence of int, optional
-            Hit IDs to exclude (e.g., already claimed by other threads).
+            If ``True``, also return a sparse directed graph containing edges
+            only for *survivors* (keeps it compact).
+        deny_hits : sequence[int] or None, keyword-only
+            Per-call deny list; persistent deny behavior can be set via
+            :meth:`Brancher.set_deny_hits`.
 
         Returns
         -------
-        branches : list of dict
-            Final set of branches (up to ``num_branches``). Each branch has:
-            * ``traj`` : list of :math:`(3,)` measured hit positions,
-            * ``hit_ids`` : list of ``int``,
-            * ``state`` : :math:`(7,)` EKF state,
-            * ``cov`` : :math:`(7\times 7)` covariance,
-            * ``score`` : accumulated :math:`\chi^2` (lower is better).
-        G : :class:`networkx.DiGraph`
-            Debug graph (empty if not recording).
+        branches : list[dict]
+            Surviving branches sorted by total score :math:`g` (ascending). Each
+            dict contains:
+
+            - ``'traj'`` : list of 3D points (including the seed triplet).
+            - ``'state'`` : final EKF state :math:`\in\mathbb{R}^7`.
+            - ``'cov'`` : final covariance :math:`7\times 7`.
+            - ``'score'`` : accumulated χ² (+ penalties if any).
+            - ``'hit_ids'`` : list of chosen hit IDs along the path.
+            - ``'id'``, ``'parent'`` : internal IDs for graph linking.
+        G : networkx.DiGraph
+            Sparse graph with edges between survivor nodes; edge ``data['cost']``
+            stores the child's cumulative score at creation time.
 
         Notes
         -----
-        * Gate radius uses :math:`S = H P_{\text{pred}} H^{\mathsf{T}} + R`.
-        * Candidate scoring uses the quadratic form
-          :math:`\chi^2 = (z - \hat{x})^{\mathsf{T}} S^{-1} (z - \hat{x})`.
-        * Beam pruning keeps ``survive_top`` elites and samples uniformly
-          without replacement from the remainder to fill up to ``num_branches``.
+        - Gate multiplier is tapered with depth (see :meth:`_gate_radius_depth`)
+          to reduce branching near the end.
+        - Covariance :math:`\mathbf{P}^+` is **shared** among a branch's
+          candidates at a layer because :math:`\mathbf{K}` and
+          :math:`(\mathbf{I}-\mathbf{K}\mathbf{H})` do not depend on
+          :math:`\mathbf{z}_j` for the position-only model.
+        - If ``layers`` is empty, returns ``([], nx.DiGraph())``.
         """
         if not layers:
             return [], nx.DiGraph()
 
-        deny: set[int] = set(map(int, deny_hits)) if deny_hits is not None else set()
+        # merge call-scoped denies with persistent deny-list (if mode='penalize', base will add cost)
+        deny = set(map(int, deny_hits)) if deny_hits is not None else None
 
-        # Seed EKF
-        dt0 = float(t[1] - t[0]) if t is not None else 1.0
-        v0, k0 = self._estimate_seed_helix(seed_xyz, dt0, self.B_z)
-        x0 = np.hstack([seed_xyz[2], v0, k0])          # (7,)
-        P0 = np.eye(self.state_dim) * 0.1              # (7,7)
+        do_graph = self.build_graph or bool(plot_tree)
+        G = nx.DiGraph() if do_graph else nx.DiGraph()
 
-        # Branch record
+        # ----- seed state from 3 seed hits -----
+        dt0 = float((t[1] - t[0]) if (t is not None and len(t) >= 2) else 1.0)
+        v0, k0 = self._estimate_seed_helix(seed_xyz.astype(self._dtype), dt0, self.B_z)
+        x0 = np.hstack([seed_xyz[2].astype(self._dtype), v0.astype(self._dtype), np.array([k0], dtype=self._dtype)])
+        P0 = np.eye(self.state_dim, dtype=self._dtype) * 0.1
+
         branches: List[Dict[str, Any]] = [{
             'id': 0,
             'parent': None,
-            'traj': [seed_xyz[0], seed_xyz[1], seed_xyz[2]],  # measured hits
+            'traj': [seed_xyz[0].astype(self._dtype), seed_xyz[1].astype(self._dtype), seed_xyz[2].astype(self._dtype)],
             'state': x0,
             'cov': P0,
             'score': 0.0,
-            'hit_ids': []  # we haven’t consumed any yet (seeds are not from candidate bank)
+            'hit_ids': []
         }]
 
-        G = nx.DiGraph() if (self.build_graph or plot_tree) else nx.DiGraph()
         next_id = 1
-        H = self.H_jac(None)
-        I7 = np.eye(self.state_dim)
-        L = len(layers)
+        N = len(layers)
 
         for i, layer in enumerate(layers):
-            depth_frac = (i + 1) / max(1, L)
-            layer_surf = self.layer_surfaces[layer]
+            depth_frac = (i + 1) / max(1, N)
             expanded: List[Dict[str, Any]] = []
 
+            # Tighten gates as we go deeper
+            gate_mul = self.gate_multiplier * max(0.5, 1.0 - self.gate_tighten * depth_frac)
+
             for br in branches:
-                # propagate to surface
+                st = br['state']
+                cv = br['cov']
+
+                # 1) Predict to the layer surface (fast base EKF predict)
                 try:
-                    dt_layer = self._solve_dt_to_surface(br['state'], layer_surf, dt_init=dt0)
+                    dt = self._solve_dt_to_surface(st, self.layer_surfaces[layer])
                 except Exception:
                     continue
 
-                F = self.compute_F(br['state'], dt_layer)
-                x_pred = self.propagate(br['state'], dt_layer)
-                P_pred = F @ br['cov'] @ F.T + self.Q0 * dt_layer
+                # Use base helper with fast kernels & caching
+                x_pred, P_pred, S, H = self._ekf_predict(st, cv, dt)
 
-                # innovation covariance & gating
-                S = H @ P_pred @ H.T + self.R
-                gate_r = self._gate_radius_fast(S, depth_frac)
-
-                # fetch candidates within gate
-                pts, ids = self._get_candidates_in_gate(x_pred[:3], layer, gate_r)
-                if len(ids) == 0:
+                # 2) Gated candidates + χ² (already vectorized & sorted top-k inside)
+                #    We ask for up to `step_candidates` best by χ² after gate.
+                pts, ids, chi2 = self._layer_topk_candidates(
+                    x_pred, S, layer,
+                    k=max(1, min(self.step_candidates, 32)),
+                    depth_frac=depth_frac,
+                    gate_mul=gate_mul,
+                    gate_tighten=self.gate_tighten,
+                    deny_hits=deny
+                )
+                if ids.size == 0:
                     continue
 
-                # deny-list filtering
-                if deny:
-                    mask = np.array([int(h) not in deny for h in ids], dtype=bool)
-                    pts, ids = pts[mask], ids[mask]
-                    if len(ids) == 0:
-                        continue
+                # 3) EKF update for all candidates with ONE gain
+                #    K = kalman_gain(P_pred, H, S)  (stable via Cholesky)
+                K = kalman_gain(P_pred, H, S).astype(self._dtype)          # (7,3)
+                KH = K @ H
+                I_KH = (self._I - KH)
+                P_upd_shared = I_KH @ P_pred                                # shared for all candidates
 
-                # vectorized χ² via solve
-                # Solve S a = diff^T  ⇒ chi2 = diff · a
-                diff = pts - x_pred[:3]                 # (m,3)
-                Sinv_diffT = solve(S, diff.T)           # (3,m)
-                chi2 = np.einsum('ni,in->n', diff, Sinv_diffT)
+                diff = (pts - x_pred[:3]).astype(self._dtype, copy=False)   # (m,3)
+                x_upds = x_pred + diff @ K.T                                # (m,7)
 
-                # keep top-K for this branch
-                kkeep = min(self.step_candidates, len(chi2))
-                order = np.argpartition(chi2, kkeep - 1)[:kkeep]
-                pts_k = pts[order]; ids_k = ids[order]; chi2_k = chi2[order]
-
-                # generate child branches
-                K = P_pred @ H.T @ np.linalg.inv(S)     # (7,3)
-                for z, hid, c in zip(pts_k, ids_k, chi2_k):
-                    x_upd = x_pred + K @ (z - x_pred[:3])
-                    P_upd = (I7 - K @ H) @ P_pred
+                # 4) Expand children (use χ² as score; optional deny penalties already baked in if used)
+                m = ids.size
+                # Global add (keep Python loop to avoid large object creation; m ≤ step_candidates)
+                for j in range(m):
+                    z   = pts[j]
+                    hid = int(ids[j])
+                    c   = float(chi2[j])
 
                     node_id = next_id; next_id += 1
-                    if self.build_graph or plot_tree:
-                        G.add_node(node_id, pos=z)
-                        G.add_edge(br['id'], node_id, cost=float(c))
-
-                    expanded.append({
+                    child = {
                         'id': node_id,
                         'parent': br['id'],
-                        'traj': br['traj'] + [z],              # measured point
-                        'state': x_upd,
-                        'cov': P_upd,
-                        'score': br['score'] + float(c),
-                        'hit_ids': br['hit_ids'] + [int(hid)]
-                    })
+                        'traj': br['traj'] + [z],
+                        'state': x_upds[j],
+                        'cov': P_upd_shared,                 # same for all j
+                        'score': br['score'] + c,
+                        'hit_ids': br['hit_ids'] + [hid]
+                    }
+                    expanded.append(child)
 
             if not expanded:
                 break
 
-            # prune to beam: top `survive_top`, plus random from the rest (diversity)
-            expanded.sort(key=lambda b: b['score'])
-            elite = expanded[:min(self.survive_top, len(expanded))]
-            rest = expanded[len(elite):]
-            need = max(0, self.num_branches - len(elite))
-            if need > 0 and rest:
-                take = min(need, len(rest))
-                idx = self._rng.choice(len(rest), size=take, replace=False)
-                elite.extend([rest[j] for j in idx])
+            # 5) Beam prune: keep `survive_top` elites; sample remainder uniformly (diversity)
+            #    (Work with indices to minimize Python attr access.)
+            scores = np.fromiter((b['score'] for b in expanded), dtype=self._dtype, count=len(expanded))
+            # elites
+            k_elite = min(self.survive_top, len(expanded))
+            elite_idx = np.argpartition(scores, k_elite - 1)[:k_elite]
+            # order elites
+            elite_idx = elite_idx[np.argsort(scores[elite_idx])]
 
-            branches = elite
+            survivors = [expanded[int(idx)] for idx in elite_idx]
 
-        # done — return the final beam (already sorted by score)
+            # fill remaining slots via random pick among the rest (without replacement)
+            need = max(0, self.num_branches - len(survivors))
+            if need > 0 and len(expanded) > k_elite:
+                rest_idx_pool = np.setdiff1d(np.arange(len(expanded)), elite_idx, assume_unique=False)
+                if need < rest_idx_pool.size:
+                    pick = self._rng.choice(rest_idx_pool, size=need, replace=False)
+                else:
+                    pick = rest_idx_pool
+                survivors.extend(expanded[int(i)] for i in pick)
+
+            branches = survivors
+
+            # 6) Optional: add only *survivor* edges to keep graph sparse
+            if do_graph:
+                for b in branches:
+                    if b['parent'] is not None:
+                        # parent node coordinate = last coord of its traj before this z
+                        G.add_edge(b['parent'], b['id'], cost=float(b['score']))
+
+        # Final ordering by score
         branches.sort(key=lambda b: b['score'])
-        return branches, G
-
-    def _plot_tree(self, G: nx.DiGraph) -> None:
-        r"""
-        Plot the branch tree in an :math:`x\!-\!y` projection.
-
-        Parameters
-        ----------
-        G : :class:`networkx.DiGraph`
-            Directed graph produced during branching. Nodes should have a
-            ``'pos'`` attribute with a 3D point; the first two coordinates are used.
-
-        Notes
-        -----
-        This is a convenience visualization for debugging. It will do nothing
-        if the graph has no nodes or nodes lack a ``'pos'`` attribute.
-        """
-        if G.number_of_nodes() == 0:
-            return
-        pos = {n: tuple(np.asarray(G.nodes[n]['pos'])[:2]) for n in G.nodes() if 'pos' in G.nodes[n]}
-        if not pos:
-            return
-        plt.figure(figsize=(8, 8))
-        nx.draw(G, pos, with_labels=False, node_size=30, arrowsize=8, width=0.6)
-        plt.title('Branching tree (XY projection)')
-        plt.tight_layout()
-        plt.show()
+        return branches[:self.num_branches], G
