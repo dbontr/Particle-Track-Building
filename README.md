@@ -11,7 +11,7 @@ $$
 \mathbf{x}=(x,\,y,\,z,\,\phi,\,\tan\lambda,\,q/p_T)^\top,\qquad
 \kappa \equiv \frac{qB}{p_T} ,
 $$
-with azimuth $\phi$, dip $\lambda$, and curvature $\kappa$ in a solenoidal field $B\hat z$. In the transverse plane the motion is circular with radius $R=1/\kappa$ and uniform angular rate $d\phi/ds=\kappa$ ($s$: path length). Over a step $s$,
+where $(x,y,z)$ are Cartesian positions, $\phi$ is the azimuth, $\tan\lambda=p_z/p_T$ is the dip (with $p_T$ the transverse momentum), and $q/p_T$ is the signed inverse transverse momentum. The curvature is $\kappa = qB/p_T = 1/R$ in a uniform solenoidal field $B\hat z$. In the transverse plane the motion is circular with radius $R$ and uniform angular rate $d\phi/ds=\kappa$ ($s$: path length). Over a step $s$,
 $$
 \begin{aligned}
 \phi' &= \phi + \kappa s,\\
@@ -21,12 +21,19 @@ z' &= z + s\,\tan\lambda .
 \end{aligned}
 $$
 
-Linearizing $f:\mathbf{x}\mapsto\mathbf{x}'$ yields $F=\partial f/\partial\mathbf{x}$. To first order in $s$,
+Linearizing $f:\mathbf{x}\mapsto\mathbf{x}'$ gives the Jacobian $F=\partial f/\partial\mathbf{x}$. One explicit form is
 $$
-\frac{\partial \phi'}{\partial (q/p_T)} = B s,\qquad
-\frac{\partial x'}{\partial (q/p_T)} \approx -B s\,\frac{q}{p_T^2}\quad(\text{small }s,\ \text{from }R=1/\kappa),
+F\approx
+\begin{pmatrix}
+1&0&0&R(\cos\phi'-\cos\phi)&0&\frac{\partial x'}{\partial(q/p_T)}\\
+0&1&0&R(\sin\phi'-\sin\phi)&0&\frac{\partial y'}{\partial(q/p_T)}\\
+0&0&1&0&s&0\\
+0&0&0&1&0&Bs\\
+0&0&0&0&1&0\\
+0&0&0&0&0&1
+\end{pmatrix},
 $$
-and similarly for the $y$-row. Sensors measure Cartesian positions
+where $\partial x'/\partial(q/p_T)$ and $\partial y'/\partial(q/p_T)$ follow from $R=1/\kappa$ and are $\mathcal{O}(sB/p_T)$. Sensors measure Cartesian positions
 $$
 h(\mathbf{x})=(x,y,z)^\top,\qquad
 H=\begin{pmatrix}1&0&0&0&0&0\\0&1&0&0&0&0\\0&0&1&0&0&0\end{pmatrix}.
@@ -38,10 +45,15 @@ For a thin scatterer with material budget $x/X_0$, the RMS multiple-scattering a
 $$
 \theta_0=\frac{13.6\,\mathrm{MeV}}{p\beta}\sqrt{\frac{x}{X_0}}\left[1+0.038\ln\!\left(\frac{x}{X_0}\right)\right] .
 $$
-We approximate $Q$ by injecting independent kicks in $(\phi,\lambda)$ with variance $\theta_0^2$ and projecting to the full state:
+We approximate $Q$ by injecting independent kicks in $(\phi,\lambda)$ with variance $\theta_0^2$ and projecting to the full state through
 $$
+G=
+\begin{pmatrix}
+0&0\\0&0\\0&0\\1&0\\0&1\\0&0
+\end{pmatrix},\qquad
 Q \approx G\,\mathrm{diag}(\theta_0^2,\theta_0^2)\,G^\top .
 $$
+This thin-scatterer model is adequate for modest layer thicknesses; see Frühwirth [19] and the Particle Data Group [26] for derivations and refinements.
 
 ### EKF equations (fused, factorized)
 
@@ -55,6 +67,7 @@ Innovation and gate (3-D Cartesian):
 $$
 r_k=\mathbf{z}_k-h(\hat{\mathbf{x}}_k),\quad
 S_k=H \hat P_k H^\top + R,\quad
+R=\mathrm{diag}(\sigma_x^2,\sigma_y^2,\sigma_z^2),\quad
 \chi^2_k=r_k^\top S_k^{-1} r_k .
 $$
 
@@ -69,7 +82,7 @@ $$
 
 Gate with global p-value $\alpha$: accept if
 $$
-\chi^2_k < \chi^2_{3;\,\alpha} .
+\chi^2_k < \chi^2_{3;\,\alpha}\qquad(\alpha\approx0.997\Rightarrow\chi^2_{3;\,\alpha}\simeq14.2) .
 $$
 We additionally **tighten** the effective radius along depth $d\in[0,1]$ by a linear factor, and scale the nominal gate by $\sqrt{\chi^2_{3;\,\alpha}}$ to avoid eigendecompositions.
 
@@ -312,38 +325,39 @@ trackml_reco/
 
 ## References
 
-1. J. Yeo _et al._, "Analytic Helix Propagation for Kalman Filters," JINST **15**, P08012 (2024).  
-2. M. Battisti _et al._, "Kalman-Filter-Based Tracking in High-Energy Physics," Comput. Phys. Commun. **324**, 108601 (2024).  
-3. A. Strandlie and R. Frühwirth, "Track Fitting with Combinatorial Kalman Filter," Nucl. Instrum. Methods Phys. Res., Sect. A **559**, 305 (2007).  
-4. A. Schöning, "Advanced Seeding Techniques for Track Reconstruction," CERN-THESIS-2021-042 (2021).  
-5. J. D. Jackson, _Classical Electrodynamics_, 3rd ed., Wiley (1998).  
-6. M. Amrouche _et al._, "The Tracking Machine Learning Challenge: Accuracy Phase," Adv. Neural Inf. Process. Syst. (2018), arXiv:1904.06778 [cs.LG].  
-7. J. H. Friedman, J. L. Bentley and R. A. Finkel, "An Algorithm for Finding Best Matches in Logarithmic Expected Time," ACM Trans. Math. Softw. **3**, 209 (1977).  
-8. SciPy `cKDTree` documentation, SciPy v1.10.1, Available at: [https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html).  
-9. G. Welch and G. Bishop, "An Introduction to the Kalman Filter," Univ. of North Carolina at Chapel Hill, TR 95-041 (1995).  
-10. MathWorks, "Tuning Kalman Filter to Improve State Estimation," MATLAB & Simulink documentation (2024), Available at: [https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html](https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html).  
-11. ACTS Collaboration, "Track Seeding," ACTS documentation v4.0.0, Available at: [https://acts.readthedocs.io/en/v4.0.0/core/seeding.html](https://acts.readthedocs.io/en/v4.0.0/core/seeding.html).  
-12. T. Golling _et al._, "TrackML: A Tracking Machine Learning Challenge," EPJ Web Conf. **214**, 06037 (2019).  
-13. M. Dorigo and T. Stützle, _Ant Colony Optimization_, MIT Press (2004).  
-14. P. E. Hart, N. J. Nilsson and B. Raphael, "A Formal Basis for the Heuristic Determination of Minimum Cost Paths," IEEE Trans. Syst. Sci. Cybern. **4**, 100 (1968).  
-15. J. H. Holland, _Adaptation in Natural and Artificial Systems_, Univ. of Michigan Press (1975); D. E. Goldberg, _Genetic Algorithms in Search, Optimization, and Machine Learning_, Addison-Wesley (1989).  
-16. J. Kennedy and R. Eberhart, "Particle Swarm Optimization," Proc. IEEE Int. Conf. Neural Netw. **4**, 1942 (1995).  
-17. S. Kirkpatrick, C. D. Gelatt and M. P. Vecchi, "Optimization by Simulated Annealing," Science **220**, 671 (1983).  
-18. H. W. Kuhn, "The Hungarian Method for the Assignment Problem," Nav. Res. Logist. Q. **2**, 83 (1955).  
-19. R. Frühwirth, "Application of Kalman Filtering to Track and Vertex Fitting," Nucl. Instrum. Methods Phys. Res., Sect. A **262**, 444 (1987).  
-20. W. Blum, W. Riegler and L. Rolandi, _Particle Detection with Drift Chambers_, 2nd ed., Springer (2008).  
-21. Y. Bar-Shalom, X. R. Li and T. Kirubarajan, _Estimation with Applications to Tracking and Navigation_, 2nd ed., Wiley (2001).  
-22. A. E. Eiben and J. E. Smith, _Introduction to Evolutionary Computing_, 2nd ed., Springer (2015).  
-23. G. Cerati _et al._, "Parallelized Kalman Filter Tracking on Many-Core Processors and GPUs," J. Phys. Conf. Ser. **608**, 012057 (2015).  
-24. M. Klijnsma _et al._, "Multi-threaded and Vectorized Kalman Filter Tracking for the CMS Experiment," Comput. Softw. Big Sci. **3**, 11 (2019).  
-25. V. L. Highland, "Some Practical Remarks on Multiple Scattering," Nucl. Instrum. Methods **129**, 497 (1975).  
-26. Particle Data Group, P. A. Zyla _et al._, "Review of Particle Physics," Prog. Theor. Exp. Phys. **2024**, 083C01 (2024).  
-27. S. Caillou _et al._, "Novel Fully-Heterogeneous GNN Designs for Track Reconstruction at the HL-LHC," EPJ Web Conf. **295**, 09028 (2024), Available at: [https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html](https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html).  
-28. G. Cerati _et al._, "Parallelized and Vectorized Tracking Using Kalman Filters with CMS Detector Geometry and Events," EPJ Web Conf. **214**, 02002 (2019), Available at: [https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html](https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html).  
-29. M. Dorigo, V. Maniezzo and A. Colorni, "Ant System: Optimization by a Colony of Cooperating Agents," IEEE Trans. Syst. Man Cybern. B **26**, 29 (1996).  
-30. J. Kennedy, "Particle Swarm Optimization," in *Encyclopedia of Machine Learning_, Springer (2011), Available at: [https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630](https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630).  
-31. D. J. Webb, W. M. Alobaidi and E. Sandgren, "Maze Navigation via Genetic Optimization," Intell. Inf. Manag. **10**, 215 (2017), Available at: [https://www.scirp.org/reference/referencespapers?referenceid=2173538](https://www.scirp.org/reference/referencespapers?referenceid=2173538).  
-32. H. M. Gray, "Quantum Pattern Recognition Algorithms for Charged Particle Tracking," Philos. Trans. R. Soc. A **380**, 20210103 (2021), Available at: [https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103](https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103).  
+1. J. Yeo, et al. (2024). “Analytic helix propagation for Kalman filters”. Journal of Instrumentation [Online]. vol 15, article P08012.
+2. M. Battisti, et al. (2024). “Kalman-filter-based tracking in high-energy physics”. Computer Physics Communications [Online]. vol 324, 108601.
+3. A. Strandlie, R. Frühwirth. (2007). “Track fitting with combinatorial Kalman filter”. Nuclear Instruments and Methods in Physics Research Section A [Online]. vol 559, p. 305.
+4. A. Schöning. (2021). “Advanced seeding techniques for track reconstruction”. CERN Thesis, CERN-THESIS-2021-042.
+5. J. D. Jackson. (1998). Classical Electrodynamics, 3rd ed. Wiley.
+6. M. Amrouche, et al. (2018). “The Tracking Machine Learning Challenge: Accuracy Phase”. Advances in Neural Information Processing Systems. arXiv:1904.06778 [cs.LG].
+7. J. H. Friedman, J. L. Bentley, R. A. Finkel. (1977). “An algorithm for finding best matches in logarithmic expected time”. ACM Transactions on Mathematical Software [Online]. vol 3, p. 209.
+8. SciPy Project. (n.d.). “cKDTree documentation”. SciPy v1.10.1 Documentation [Online]. Available: [https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html](https://docs.scipy.org/doc/scipy/reference/generated/scipy.spatial.cKDTree.html)
+9. G. Welch, G. Bishop. (1995). “An introduction to the Kalman filter”. University of North Carolina at Chapel Hill, Technical Report TR 95-041.
+10. MathWorks. (2024). “Tuning Kalman filter to improve state estimation”. MATLAB & Simulink Documentation [Online]. Available: [https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html](https://www.mathworks.com/help/control/ug/tuning-kalman-filter.html)
+11. ACTS Collaboration. (n.d.). “Track seeding”. ACTS Documentation v4.0.0 [Online]. Available: [https://acts.readthedocs.io/en/v4.0.0/core/seeding.html](https://acts.readthedocs.io/en/v4.0.0/core/seeding.html)
+12. T. Golling, et al. (2019). “TrackML: A tracking machine learning challenge”. EPJ Web of Conferences [Online]. vol 214, 06037.
+13. M. Dorigo, T. Stützle. (2004). Ant Colony Optimization. MIT Press.
+14. P. E. Hart, N. J. Nilsson, B. Raphael. (1968). “A formal basis for the heuristic determination of minimum cost paths”. IEEE Transactions on Systems Science and Cybernetics [Online]. vol 4, p. 100.
+15. J. H. Holland. (1975). Adaptation in Natural and Artificial Systems. University of Michigan Press; D. E. Goldberg. (1989). Genetic Algorithms in Search, Optimization, and Machine Learning. Addison-Wesley.
+16. J. Kennedy, R. Eberhart. (1995). “Particle swarm optimization”. Proceedings of the IEEE International Conference on Neural Networks [Online]. vol 4, p. 1942.
+17. S. Kirkpatrick, C. D. Gelatt, M. P. Vecchi. (1983). “Optimization by simulated annealing”. Science [Online]. vol 220, p. 671.
+18. H. W. Kuhn. (1955). “The Hungarian method for the assignment problem”. Naval Research Logistics Quarterly [Online]. vol 2, p. 83.
+19. R. Frühwirth. (1987). “Application of Kalman filtering to track and vertex fitting”. Nuclear Instruments and Methods in Physics Research Section A [Online]. vol 262, p. 444.
+20. W. Blum, W. Riegler, L. Rolandi. (2008). Particle Detection with Drift Chambers, 2nd ed. Springer.
+21. Y. Bar-Shalom, X. R. Li, T. Kirubarajan. (2001). Estimation with Applications to Tracking and Navigation, 2nd ed. Wiley.
+22. A. E. Eiben, J. E. Smith. (2015). Introduction to Evolutionary Computing, 2nd ed. Springer.
+23. G. Cerati, et al. (2015). “Parallelized Kalman filter tracking on many-core processors and GPUs”. Journal of Physics: Conference Series [Online]. vol 608, 012057.
+24. M. Klijnsma, et al. (2019). “Multi-threaded and vectorized Kalman filter tracking for the CMS experiment”. Computing and Software for Big Science [Online]. vol 3, article 11.
+25. V. L. Highland. (1975). “Some practical remarks on multiple scattering”. Nuclear Instruments and Methods [Online]. vol 129, p. 497.
+26. Particle Data Group; P. A. Zyla, et al. (2024). “Review of particle physics”. Progress of Theoretical and Experimental Physics [Online]. vol 2024, 083C01.
+27. S. Caillou, et al. (2024). “Novel fully-heterogeneous GNN designs for track reconstruction at the HL-LHC”. EPJ Web of Conferences [Online]. vol 295. Available: [https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html](https://www.epj-conferences.org/articles/epjconf/abs/2024/05/epjconf_chep2024_09028/epjconf_chep2024_09028.html)
+28. G. Cerati, et al. (2019). “Parallelized and vectorized tracking using Kalman filters with CMS detector geometry and events”. EPJ Web of Conferences [Online]. vol 214. Available: [https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html](https://www.epj-conferences.org/articles/epjconf/abs/2019/19/epjconf_chep2018_02002/epjconf_chep2018_02002.html)
+29. M. Dorigo, V. Maniezzo, A. Colorni. (1996). “Ant system: optimization by a colony of cooperating agents”. IEEE Transactions on Systems, Man, and Cybernetics, Part B [Online]. vol 26, p. 29.
+30. J. Kennedy. (2011). “Particle swarm optimization”. Encyclopedia of Machine Learning. Springer [Online]. Available: [https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630](https://link.springer.com/referenceworkentry/10.1007/978-0-387-30164-8_630)
+31. D. J. Webb, W. M. Alobaidi, E. Sandgren. (2017). “Maze navigation via genetic optimization”. Intelligent Information Management [Online]. vol 10. Available: [https://www.scirp.org/reference/referencespapers?referenceid=2173538]([https://www.scirp.org/reference/referencespapers?referenceid=2173538)
+32. H. M. Gray. (2021). “Quantum pattern recognition algorithms for charged particle tracking”. Philosophical Transactions of the Royal Society A [Online]. vol 380, 20210103. Available: [https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103](https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103)
+33. R. E. Kalman. (1960). “A new approach to linear filtering and prediction problems”. Journal of Basic Engineering [Online]. vol 82, p. 35.
 
 ## Getting Started
 
