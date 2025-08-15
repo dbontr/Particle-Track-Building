@@ -120,14 +120,14 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("-d", "--debug-n", type=int, default=None,
                    help="If set, only process this many seeds (default: None).")
     p.add_argument("--plot", action="store_true", default=False,
-                   help="Show seed/track plots (default: True).")
+                   help="Show seed/track plots (default: False).")
     p.add_argument("--no-plot", dest="plot", action="store_false",
                    help="Disable plotting.")
     p.add_argument("--extra-plots", action="store_true", default=False,
                    help="Display extra presentation plots (default: False).")
-    p.add_argument("--parallel", action="store_true", default=True,
+    p.add_argument("--parallel", action="store_true", default=False,
                    help="Enable collaborative parallel track building (default: False).")
-    p.add_argument("-b", "--brancher", type=str, choices=BRANCHER_KEYS, default="astar",
+    p.add_argument("-b", "--brancher", type=str, choices=BRANCHER_KEYS, default="ekf",
                    metavar="BRANCHER",
                    help="Branching strategy: ekf | astar | aco | pso | sa | ga | hungarian (default: ekf)")
     p.add_argument("--config", type=str, default="config.json",
@@ -138,11 +138,11 @@ def build_parser() -> argparse.ArgumentParser:
                    help="If set, write pstats text to this file.")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Enable verbose logging.")
-    p.add_argument("--optimize", action="store_true", default=True,
+    p.add_argument("--optimize", action="store_true", default=False,
                    help="Run parameter optimization for the selected brancher instead of a single build.")
     p.add_argument("--opt-metric", type=str, default="mse",
                    help="Objective metric to minimize (e.g., mse, rmse, recall, precision, f1, pct_hits, score).")
-    p.add_argument("--opt-iterations", type=int, default=250,
+    p.add_argument("--opt-iterations", type=int, default=40,
                    help="Number of optimization iterations (default: 40).")
     p.add_argument("--opt-n-init", type=int, default=10,
                    help="Number of initial random points for Bayesian search (default: 10).")
