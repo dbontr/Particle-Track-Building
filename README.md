@@ -6,12 +6,12 @@ Fast, headless-safe TrackML reconstruction with a helical EKF core and a family 
 
 ### State, kinematics, and propagation
 
-We adopt the helical state
+The trajectory of a charged particle in a uniform solenoidal magnetic field is a helix obtained by solving the Lorentz-force equation $d\mathbf{p}/ds=q\,\mathbf{v}\times\mathbf{B}$ for constant $B\hat z$. Projected onto the transverse plane the motion is circular, while the longitudinal component advances linearly with path length.  We adopt the helical state
 $$
 \mathbf{x}=(x,\,y,\,z,\,\phi,\,\tan\lambda,\,q/p_T)^\top,\qquad
 \kappa \equiv \frac{qB}{p_T} ,
 $$
-where $(x,y,z)$ are Cartesian positions, $\phi$ is the azimuth, $\tan\lambda=p_z/p_T$ is the dip (with $p_T$ the transverse momentum), and $q/p_T$ is the signed inverse transverse momentum. The curvature is $\kappa = qB/p_T = 1/R$ in a uniform solenoidal field $B\hat z$. In the transverse plane the motion is circular with radius $R$ and uniform angular rate $d\phi/ds=\kappa$ ($s$: path length). Over a step $s$,
+where $(x,y,z)$ are Cartesian positions, $\phi$ is the azimuth, $\tan\lambda=p_z/p_T$ is the dip (with $p_T$ the transverse momentum), and $q/p_T$ is the signed inverse transverse momentum. The curvature is $\kappa=qB/p_T=1/R$ with cyclotron radius $R$. In the transverse plane the motion is circular with uniform angular rate $d\phi/ds=\kappa$ ($s$: path length). Integrating the equations of motion over a step $s$ gives
 $$
 \begin{aligned}
 \phi' &= \phi + \kappa s,\\
@@ -21,7 +21,7 @@ z' &= z + s\,\tan\lambda .
 \end{aligned}
 $$
 
-Linearizing $f:\mathbf{x}\mapsto\mathbf{x}'$ gives the Jacobian $F=\partial f/\partial\mathbf{x}$. One explicit form is
+These expressions follow from elementary circle geometry; see Karimäki [34] for a detailed derivation.  Linearizing $f:\mathbf{x}\mapsto\mathbf{x}'$ gives the Jacobian $F=\partial f/\partial\mathbf{x}$. One explicit form is
 $$
 F\approx
 \begin{pmatrix}
@@ -33,7 +33,13 @@ F\approx
 0&0&0&0&0&1
 \end{pmatrix},
 $$
-where $\partial x'/\partial(q/p_T)$ and $\partial y'/\partial(q/p_T)$ follow from $R=1/\kappa$ and are $\mathcal{O}(sB/p_T)$. Sensors measure Cartesian positions
+where the remaining derivatives are
+$$
+\frac{\partial x'}{\partial(q/p_T)}=-\frac{R}{q/p_T}(\sin\phi'-\sin\phi)+RBs\cos\phi',\\
+\frac{\partial y'}{\partial(q/p_T)}=-\frac{R}{q/p_T}(\cos\phi'-\cos\phi)+RBs\sin\phi',
+$$
+obtained from $R=1/\kappa$ and $\phi'=\phi+Bs\,q/p_T$.
+Sensors measure Cartesian positions
 $$
 h(\mathbf{x})=(x,y,z)^\top,\qquad
 H=\begin{pmatrix}1&0&0&0&0&0\\0&1&0&0&0&0\\0&0&1&0&0&0\end{pmatrix}.
@@ -53,7 +59,7 @@ G=
 \end{pmatrix},\qquad
 Q \approx G\,\mathrm{diag}(\theta_0^2,\theta_0^2)\,G^\top .
 $$
-This thin-scatterer model is adequate for modest layer thicknesses; see Frühwirth [19] and the Particle Data Group [26] for derivations and refinements.
+Here $G$ maps scattering kicks in the dip and azimuth into the full state.  This thin-scatterer model is adequate for modest layer thicknesses; see Frühwirth [19] and the Particle Data Group [26] for derivations and refinements.
 
 ### EKF equations (fused, factorized)
 
@@ -98,6 +104,7 @@ Best-first with $f(n)=g(n)+h(n)$, where $g$ is accumulated $\chi^2$ and $h$ pena
 $$
 C_\perp=\lambda_\perp\frac{\|(I-\mathbf{t}\mathbf{t}^\top)(\mathbf{z}-\hat{\mathbf{x}})\|^2}{\sigma^2}.
 $$
+Classical heuristics and admissibility conditions are discussed in Hart, Nilsson and Raphael [14] and Russell and Norvig [35].
 
 ### ACO
 
@@ -358,29 +365,31 @@ trackml_reco/
 31. D. J. Webb, W. M. Alobaidi, E. Sandgren. (2017). “Maze navigation via genetic optimization”. Intelligent Information Management [Online]. vol 10. Available: [https://www.scirp.org/reference/referencespapers?referenceid=2173538]([https://www.scirp.org/reference/referencespapers?referenceid=2173538)
 32. H. M. Gray. (2021). “Quantum pattern recognition algorithms for charged particle tracking”. Philosophical Transactions of the Royal Society A [Online]. vol 380, 20210103. Available: [https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103](https://royalsocietypublishing.org/doi/10.1098/rsta.2021.0103)
 33. R. E. Kalman. (1960). “A new approach to linear filtering and prediction problems”. Journal of Basic Engineering [Online]. vol 82, p. 35.
+34. V. Karimäki. (1991). “Effective circle fitting for particle trajectories”. Computer Physics Communications [Online]. vol 69, p. 137.
+35. S. Russell, P. Norvig. (2010). Artificial Intelligence: A Modern Approach, 3rd ed. Pearson.
 
 ## Getting Started
 
-1. **Install Dependencies**:
+0. **Set Up Environment** (Python ≥ 3.9):
 
     ```bash
+    python -m venv .venv
+    source .venv/bin/activate
     pip install -r requirements.txt
     ```
 
-2. **Download Dataset**:
+1. **Download Dataset**:
 
-     Obtain the TrackML Particle Identification dataset from the
-     [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules)
-     and place the desired event ``.zip`` files (e.g. ``train_1.zip``) in a known location.
+     Obtain the TrackML Particle Identification dataset from the [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules) and place the desired event ``.zip`` files (e.g. ``train_1.zip``) in a known location. The reader accepts both zipped events and directories produced by unzipping.
 
-3. **Run Reconstruction**:
+2. **Run Reconstruction**:
 
      ```bash
      python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --pt 2.0
      ```
 
-     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,``ga``, ``hungarian``). Add ``--parallel`` to enable the collaborative track builder and ``--config`` to use a custom JSON configuration. Use ``-h`` for the full list of options.
+     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,``ga``, ``hungarian``). Add ``--parallel`` to enable the collaborative track builder and ``--config`` to use a custom JSON configuration. Run ``python -m trackml_reco.main -h`` for the full list of options.
 
-4. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
+3. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
 
 _Tip:_ Tune `noise_std`, `num_branches`, and gating thresholds (`gate_*`) in `config.json` to your detector geometry and occupancy.
