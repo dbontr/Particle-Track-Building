@@ -160,7 +160,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="If set, write best-tuned full config JSON to this path.")
     p.add_argument("--opt-history", type=str, default=None,
                    help="If set, write a CSV of trial history to this path.")
-    p.add_argument("--opt-skopt-kind", type=str, default="forest",
+    p.add_argument("--opt-skopt-kind", type=str, default="auto",
                    choices=("auto", "gp", "forest", "gbrt", "random"),
                    help="Which skopt backend to use if available (default: auto).")
     p.add_argument("--opt-plot", type=str, default=None,
