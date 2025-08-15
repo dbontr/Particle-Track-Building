@@ -4,8 +4,12 @@ import copy
 import json
 import math
 import os
+import io
+import sys
 import time
 import logging
+from collections import deque
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Mapping, Optional, Tuple
@@ -35,6 +39,326 @@ BRANCHER_MAP = {
     "ga": HelixEKFGABrancher,
     "hungarian": HelixEKFHungarianBrancher,
 }
+
+@contextmanager
+def _suppress_stdout(enabled: bool = True):
+    r'''
+    Temporarily silence :func:`print` by redirecting ``sys.stdout`` to an in-memory
+    buffer **without touching logging**.
+
+    Within the context, Python-level writes to standard output are diverted to a
+    fresh :class:`io.StringIO` instance, so nothing appears on the console. On exit,
+    the original ``sys.stdout`` is restored.
+
+    Parameters
+    ----------
+    enabled : bool, optional
+        If ``False``, the context is a no-op. If ``True`` (default), redirect
+        ``sys.stdout`` for the duration of the ``with`` block.
+
+    Yields
+    ------
+    None
+        This is a context manager; it yields control to the body of the
+        ``with`` statement.
+
+    Notes
+    -----
+    - Only affects **``sys.stdout``**. It does **not** affect ``sys.stderr``,
+    the :mod:`logging` framework (whose handlers typically write to ``stderr``),
+    or native extensions that bypass Python I/O and write directly to file
+    descriptors.
+    - The redirection is **process-global**, not thread-local; concurrent threads
+    printing to ``stdout`` during the context are also silenced.
+    - The captured buffer is discarded on exit. For capturing instead of suppressing,
+    consider :class:`contextlib.redirect_stdout`.
+
+    Examples
+    --------
+    Silence noisy third-party prints:
+
+    >>> with _suppress_stdout(True):
+    ...     print("hidden")
+    >>> print("visible")
+    visible
+
+    Enable/disable conditionally:
+
+    >>> verbose = False
+    >>> with _suppress_stdout(not verbose):
+    ...     print("only shown when verbose=True")
+    '''
+    if not enabled:
+        yield
+        return
+    saved = sys.stdout
+    try:
+        sys.stdout = io.StringIO()
+        yield
+    finally:
+        sys.stdout = saved
+
+@contextmanager
+def _temp_logger_level(name: str, level: int | None):
+    r'''
+    Temporarily set the level of a single named logger.
+
+    Let ``L`` denote the logger with name ``name``. During the context this function
+    sets ``L``'s level to ``level`` (e.g., :data:`logging.WARNING`) and then restores
+    its original level on exit. If ``level`` is ``None``, the context is a no-op.
+
+    This only alters the **logger’s own level**; it does not mutate handlers, the
+    root logger, or unrelated loggers, and it does not disable propagation.
+
+    Parameters
+    ----------
+    name : str
+        Dotted logger name (e.g., ``"trackml_reco.track_builder"``).
+    level : int or None
+        Target level for the named logger (e.g., :data:`logging.DEBUG`,
+        :data:`logging.INFO`, :data:`logging.WARNING`). If ``None``, nothing is
+        changed.
+
+    Yields
+    ------
+    None
+        This is a context manager; it yields control to the body of the
+        ``with`` statement.
+
+    Notes
+    -----
+    - **Effective level.** The level used to decide whether a record is emitted is
+    the first non-``NOTSET`` level encountered along the logger hierarchy. Writing
+    this as a recursion with parent operator :math:`\pi(\cdot)`,
+
+    .. math::
+
+        \mathrm{level}_{\mathrm{eff}}(L) =
+        \begin{cases}
+            \mathrm{level}(L), & \mathrm{level}(L) \ne \text{NOTSET},\\[3pt]
+            \mathrm{level}_{\mathrm{eff}}\bigl(\pi(L)\bigr), & \text{otherwise}.
+        \end{cases}
+
+    Therefore setting a child’s level may or may not change behavior depending on
+    its current value and the ancestors’ levels.
+    - The change is **process-global** for the duration of the context (logging is
+    global state) and not thread-local.
+    - Handlers attached to the logger still apply their own level thresholds.
+
+    Examples
+    --------
+    Silence a chatty module below WARNING for a block:
+
+    >>> import logging
+    >>> logging.getLogger("libX").info("before")   # may appear
+    >>> with _temp_logger_level("libX", logging.WARNING):
+    ...     logging.getLogger("libX").info("hidden")
+    ...     logging.getLogger("libX").warning("shown")
+    shown
+    >>> logging.getLogger("libX").info("after")    # back to original behavior
+
+    No-op when ``level=None``:
+
+    >>> with _temp_logger_level("libX", None):
+    ...     logging.getLogger("libX").debug("unchanged")
+
+    See Also
+    --------
+    logging.getLogger : Retrieve a logger by name.
+    logging.Logger.setLevel : Permanently change a logger’s level.
+    logging.disable : Process-wide ceiling for all logging.
+    logging.Logger.propagate : Control propagation to ancestor loggers.
+    '''
+    if level is None:
+        yield
+        return
+    lg = logging.getLogger(name)
+    old = lg.level
+    try:
+        lg.setLevel(level)
+        yield
+    finally:
+        lg.setLevel(old)
+
+def _isatty() -> bool:
+    r'''
+    Return ``True`` if stdout appears to be an interactive ANSI-capable terminal.
+
+    The check combines :meth:`sys.stdout.isatty` with a small Windows heuristic:
+    on ``os.name == "nt"`` we additionally require either ``WT_SESSION`` or
+    ``TERM`` in the environment, which is a pragmatic proxy for terminals that
+    understand ANSI escape codes.
+
+    Returns
+    -------
+    bool
+        ``True`` if interactive; ``False`` otherwise.
+
+    Notes
+    -----
+    This is a conservative predicate intended for **cosmetic** output decisions
+    (e.g. coloring). It is not a guarantee that every control sequence will be
+    interpreted by the terminal.
+
+    See Also
+    --------
+    _ansi : Return an ANSI escape sequence for a named color (or empty when disabled).
+    '''
+    return sys.stdout.isatty() and (os.name != "nt" or "WT_SESSION" in os.environ or "TERM" in os.environ)
+
+def _ansi(color: str) -> str:
+    r'''
+    Return an ANSI color escape sequence when coloring is enabled.
+
+    Coloring is **disabled** when either (i) stdout is not an interactive TTY
+    (see :func:`_isatty`) or (ii) the environment variable ``NO_COLOR`` is set.
+    In those cases this function returns the empty string.
+
+    Parameters
+    ----------
+    color : {"reset", "green", "dim"}
+        Logical color/request key. Unknown keys yield ``""``.
+
+    Returns
+    -------
+    str
+        ANSI escape sequence (e.g. ``"\x1b[32m"``) or ``""`` when disabled.
+
+    Notes
+    -----
+    Typical usage is to wrap colored segments as
+    ``f"{_ansi('green')}text{_ansi('reset')}"``. When coloring is disabled the
+    wrapping reduces to just ``"text"``.
+
+    See Also
+    --------
+    _isatty : Detect interactive terminals.
+    '''
+    if not _isatty() or os.environ.get("NO_COLOR"):
+        return ""
+    table = {
+        "reset": "\x1b[0m",
+        "green": "\x1b[32m",
+        "dim": "\x1b[2m",
+    }
+    return table.get(color, "")
+
+def _fmt_time(seconds: float) -> str:
+    r'''
+    Format seconds as ``H:MM:SS`` (if :math:`\ge 1\ \mathrm{hour}`) or ``MM:SS``.
+
+    Let :math:`T \ge 0` be the number of seconds. We compute
+
+    .. math::
+    H = \left\lfloor \tfrac{T}{3600} \right\rfloor,\quad
+    M = \left\lfloor \tfrac{T - 3600H}{60} \right\rfloor,\quad
+    S = \left\lfloor T - 3600H - 60M \right\rfloor,
+
+    and return ``f"{H}:{M:02d}:{S:02d}"`` if :math:`H>0`, otherwise
+    ``f"{M:02d}:{S:02d}"``.
+
+    Parameters
+    ----------
+    seconds : float
+        Non-negative duration in seconds. Negative inputs are clamped to ``0``.
+
+    Returns
+    -------
+    str
+        ``"H:MM:SS"`` or ``"MM:SS"``.
+
+    Examples
+    --------
+    >>> _fmt_time(65.2)
+    '01:05'
+    >>> _fmt_time(3661.0)
+    '1:01:01'
+    '''
+    seconds = max(0.0, float(seconds))
+    h = int(seconds // 3600)
+    m = int((seconds % 3600) // 60)
+    s = int(seconds % 60)
+    if h > 0:
+        return f"{h:d}:{m:02d}:{s:02d}"
+    return f"{m:02d}:{s:02d}"
+
+def _render_bar(cur: int, total: int, width: int = 24) -> str:
+    r'''
+    Render a short progress bar string, optionally colored for TTYs.
+
+    Given the current step :math:`c`, total steps :math:`T>0`, and bar width
+    :math:`W`, we compute the filled cell count
+
+    .. math::
+    f \;=\; \operatorname{round}\!\left(W \cdot \frac{\max(0,\min(c,T))}{T}\right),
+
+    and render a bar with :math:`f` ``'█'`` characters and :math:`W-f` ``'-'``.
+    On ANSI-capable TTYs (see :func:`_isatty`), the bar is emitted in green.
+
+    Parameters
+    ----------
+    cur : int
+        Current step (clamped to ``[0, total]``).
+    total : int
+        Total number of steps (clamped to at least ``1``).
+    width : int, optional
+        Number of character cells in the bar (default ``24``).
+
+    Returns
+    -------
+    str
+        The progress bar string, e.g. ``"█████-----"`` for ``width=10``.
+
+    Examples
+    --------
+    >>> _render_bar(5, 10, width=10)[:10]
+    '█████-----'
+    '''
+    total = max(1, int(total))
+    cur = min(max(0, int(cur)), total)
+    frac = cur / total
+    fill = int(round(frac * width))
+    bar_raw = "█" * fill + "-" * (width - fill)
+    if _isatty() and not os.environ.get("NO_COLOR"):
+        return f"{_ansi('green')}{bar_raw}{_ansi('reset')}"
+    return bar_raw
+
+def _print_progress_line(line: str) -> None:
+    r'''
+    Rewrite the current console line with a single in-place progress message.
+
+    The function emits the control sequence ``ESC[2K`` (erase entire line),
+    carriage return ``\\r``, the provided text, and then flushes stdout. This
+    style is suitable for compact, continuously updating progress indicators.
+
+    Parameters
+    ----------
+    line : str
+        The text to display on the current line.
+
+    Notes
+    -----
+    - Intended for single-threaded console output; mixing with other writers may
+    yield interleaved lines.
+    - No trailing newline is printed; call :func:`_finish_progress_line` to end
+    the progress block.
+    '''
+    sys.stdout.write("\x1b[2K\r" + line)
+    sys.stdout.flush()
+
+def _finish_progress_line() -> None:
+    r'''
+    Terminate the single-line progress block by printing a newline.
+
+    Writes ``"\\n"`` to stdout and flushes, ensuring subsequent output starts on
+    the next line.
+
+    Returns
+    -------
+    None
+    '''
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
 def _resolve_cfg_key(brancher_key: str) -> str:
     r"""
@@ -498,6 +822,8 @@ def evaluate_once(
     aggregator: str = "mean",
     n_best_tracks: Optional[int] = None,  # None/<=0 => ALL
     tol: float = 0.005,
+    suppress_builder_logs: bool = True,
+    suppress_builder_prints: bool = True,
 ) -> float:
     r"""
     Run a **single evaluation** (build tracks and score) for a parameter set.
@@ -534,6 +860,10 @@ def evaluate_once(
         If positive, aggregate only over that many best tracks.
     tol : float, optional
         Tolerance for geometric matching (meters).
+    suppress_builder_logs : bool, optional
+        For suppressing the extra logs
+    suppress_builder_prints : bool, optional
+        For suppressing the extra prints
 
     Returns
     -------
@@ -559,13 +889,20 @@ def evaluate_once(
     max_tracks_per_seed = int(ekf_cfg.get("num_branches", 30))
     survive_top = int(ekf_cfg.get("survive_top", 12))
 
+    # Silence only the builder's own noise during optimization:
+    # - mute INFO logs from trackml_reco.track_builder (keep WARNING+)
+    # - suppress print() called inside builder
     try:
-        builder.build_tracks_from_truth(
-            max_seeds=max_seeds,
-            max_tracks_per_seed=max_tracks_per_seed,
-            max_branches=survive_top,
-            jitter_sigma=1e-4,
-        )
+        with _temp_logger_level("trackml_reco.track_builder", logging.WARNING), \
+             _suppress_stdout(True):
+            builder.build_tracks_from_truth(
+                max_seeds=max_seeds,
+                max_tracks_per_seed=max_tracks_per_seed,
+                max_branches=survive_top,
+                jitter_sigma=1e-4,
+            )
+    except KeyboardInterrupt:
+        raise
     except Exception:
         logger.exception("Evaluation failed; penalty assigned. Params=%s", params)
         return 1e6
@@ -592,6 +929,69 @@ class OptResult:
     best_value: float
     history: List[Dict[str, Any]]  # {"value": float, "params": {...}, "time_s": float}
 
+def _plot_history(history: List[Dict[str, Any]], metric: str, out_path: Path) -> None:
+    r'''
+    Save a compact two-panel optimization history figure.
+
+    The top panel shows the per-trial objective values :math:`v_t` and the
+    best-so-far envelope
+
+    .. math::
+    b_t \;=\; \min_{1 \le i \le t} v_i,
+
+    while the bottom panel shows the wall-clock duration per trial.
+
+    Parameters
+    ----------
+    history : list of dict
+        Trial records, each with keys ``"value"`` (float) and ``"time_s"`` (float).
+    metric : str
+        Label for the objective being plotted (e.g. ``"mse"``, ``"1/score"``).
+    out_path : pathlib.Path
+        Destination path for the PNG file.
+
+    Notes
+    -----
+    - The function forces a non-interactive backend (``Agg``) to be safe in
+    headless environments.
+    - The best-so-far curve is computed via :func:`numpy.minimum.accumulate`.
+    - This function **does not** raise if saving fails; it closes the figure
+    unconditionally to avoid leaking GUI resources.
+
+    Examples
+    --------
+    >>> hist = [{"value": 1.2, "time_s": 0.8}, {"value": 0.9, "time_s": 0.7}]
+    >>> from pathlib import Path
+    >>> _plot_history(hist, "mse", Path("opt_progress.png"))  # doctest: +SKIP
+    '''
+    if not history:
+        return
+    import matplotlib
+    matplotlib.use("Agg", force=True)
+    import matplotlib.pyplot as plt
+
+    vals = np.array([h["value"] for h in history], dtype=float)
+    durs = np.array([h["time_s"] for h in history], dtype=float)
+    best_so_far = np.minimum.accumulate(vals)
+
+    fig = plt.figure(figsize=(8.5, 5.5))
+    ax1 = fig.add_subplot(2, 1, 1)
+    ax1.plot(vals, label=f"{metric} per trial", linewidth=1.6)
+    ax1.plot(best_so_far, label="best so far", linewidth=1.6)
+    ax1.set_ylabel(metric)
+    ax1.legend()
+    ax1.grid(True, alpha=0.3)
+
+    ax2 = fig.add_subplot(2, 1, 2)
+    ax2.plot(durs, label="duration (s)", linewidth=1.6)
+    ax2.set_xlabel("trial")
+    ax2.set_ylabel("seconds")
+    ax2.grid(True, alpha=0.3)
+
+    fig.tight_layout()
+    fig.savefig(out_path, dpi=120)
+    plt.close(fig)
+
 def optimize_brancher(
     *,
     hit_pool,
@@ -609,92 +1009,317 @@ def optimize_brancher(
     aggregator: str = "mean",   # per-track aggregator ("mean", "median", "min", "max")
     n_best_tracks: int = 5,     # how many best tracks to aggregate
     tol: float = 0.005,         # tolerance passed to compute_metrics
+    plot_path: Optional[Path] = None,  # where to save history plot
 ) -> OptResult:
-    r"""
+    r'''
     Optimize a brancher’s hyperparameters against a chosen metric.
 
-    The routine minimizes a scalar objective derived from either the **TrackML
-    event score** (using :math:`1/\text{score}` so lower is better) or **per-track
-    metrics** aggregated across tracks (see :func:`_objective_from_builder`).
+    This routine searches a user-defined hyperparameter space and **minimizes**
+    a scalar objective derived either from the TrackML **event score** (by
+    minimizing :math:`1/\mathrm{score}`) or from **per-track metrics** aggregated
+    over completed tracks (see :func:`_objective_from_builder`).
+
+    Mathematical objective
+    ----------------------
+    Let :math:`m` denote the selected metric (e.g., ``"mse"``, ``"rmse"``,
+    ``"recall"``, ``"precision"``, ``"f1"``, or ``"score"``). For per-track
+    metrics the builder returns a set of completed tracks
+    :math:`\{\mathcal{T}_i\}_{i=1}^{N}` and we evaluate :math:`m_i` on each track.
+    A loss transform :math:`L(\cdot)` converts the metric to “lower is better”:
+
+    .. math::
+
+    L(v) \;=\;
+    \begin{cases}
+        v, & \text{if } m \in \{\mathrm{MSE}, \mathrm{RMSE}\}, \\
+        1 - v, & \text{if } 0 \le v \le 1 \text{ (fractional metric)}, \\
+        100 - v, & \text{otherwise (percentage metric)}.
+    \end{cases}
+
+    The scalar objective aggregated over either **all** completed tracks or the
+    **best** :math:`N^\*` tracks is
+
+    .. math::
+
+    \mathrm{obj}
+    \;=\;
+    \phi\!\left(\,\{\,L(m_i)\,\}_{i=1}^{N^\*}\right),
+
+    where :math:`\phi\in\{\text{mean},\text{median},\min,\max\}` is the requested
+    aggregator and :math:`N^\*` is either :math:`N` (all tracks) or the user-chosen
+    ``n_best_tracks``.  When optimizing the event **score**, the objective is
+
+    .. math::
+
+    \mathrm{obj}_\text{score}
+    \;=\;
+    \frac{1}{\max(\mathrm{score},\;10^{-9})},
+
+    computed from a submission built from **all** completed tracks in the trial.
 
     Search strategy
     ---------------
-    - If :mod:`scikit-optimize` is available, use one of its minimizers:
-      Gaussian-process (``"gp"``), random-forest (``"forest"``), gradient-boosted
-      trees (``"gbrt"``), or random (``"random"``). The choice ``"auto"`` uses
-      GP by default.
-    - Otherwise, fall back to **random search** with a warmup of ``n_init``
-      samples followed by local perturbations around the current best.
+    - If :mod:`scikit-optimize` is available, one of its minimizers is used:
+    Gaussian process (``"gp"``), random forest (``"forest"``),
+    gradient-boosted trees (``"gbrt"``), or random (``"random"``).
+    The choice ``"auto"`` defaults to GP.
+    - Otherwise, a robust fallback of **random search** with ``n_init`` warmup
+    trials is followed by **local perturbations** around the incumbent best.
 
-    Objective definition
-    --------------------
-    For a per-track metric :math:`m` and tracks :math:`i=1,\dots,N`, the
-    objective is
-
-    .. math::
-        \text{obj} \;=\; \phi\!\left(\{\,L(m_i)\,\}_{i=1}^{N^\*}\right),
-
-    where :math:`L(\cdot)` converts a metric to a *loss* (see
-    :func:`_loss_from_value`), :math:`\phi` is the requested aggregator
-    (``"mean"`` by default), and :math:`N^\*` equals either all tracks or the
-    best ``n_best_tracks`` according to the builder’s ranking.
+    During the search, per-trial progress (running mean, wall time, ETA) is printed
+    as a single updating line and a PNG history plot is written at the end.
 
     Parameters
     ----------
     hit_pool : HitPool
-        Input data for building tracks.
-    base_config : mapping
-        Experiment configuration containing brancher blocks.
+        Input data structure used by the builder (KD-trees, reservations, etc.).
+    base_config : Mapping[str, Any]
+        Configuration dictionary containing per-brancher parameter blocks.
     brancher_key : str
-        Which brancher to tune (see :data:`BRANCHER_MAP`).
+        Which brancher to tune (e.g., ``"ekf"``, ``"astar"``, ``"aco"``,
+        ``"pso"``, ``"sa"``, ``"ga"``, ``"hungarian"``).
     space_path : pathlib.Path
-        Path to a JSON file describing the search space (see :class:`ParamDef`).
+        Path to a JSON file describing the search space.  Each entry specifies a
+        parameter with fields ``{"name","type","min","max","log","choices"}``.
     metric : str, optional
-        Objective metric (``"mse"``, ``"rmse"``, ``"recall"``, ``"precision"``, ``"f1"``, or ``"score"``).
+        Objective metric. One of ``"mse"``, ``"rmse"``, ``"recall"``,
+        ``"precision"``, ``"f1"``, or ``"score"``.  Common aliases are accepted
+        (e.g., ``"pct_hits"`` :math:`\to` ``"recall"``).
     iterations : int, optional
-        Total number of trials (calls to the objective).
+        Total number of trials (objective evaluations). Default is ``40``.
     n_init : int, optional
-        Number of initial random evaluations (used by both skopt and fallback).
+        Number of initial random evaluations. Used by both skopt and the fallback.
     use_parallel : bool, optional
-        Use :class:`CollaborativeParallelTrackBuilder` instead of single-threaded.
+        If ``True``, use :class:`CollaborativeParallelTrackBuilder`; otherwise use
+        the single-threaded :class:`TrackBuilder`. Default ``False``.
     parallel_time_budget : float or None, optional
-        Per-seed time budget (seconds) in parallel mode.
+        Per-seed time budget (seconds) in parallel mode; ``None`` disables it.
     max_seeds : int or None, optional
-        Limit the number of seeds per trial to control runtime.
+        Optional cap on seeds per trial to control runtime. Default ``200``.
     rng_seed : int or None, optional
-        Random seed for sampling and skopt (when used).
+        Random seed used for sampling (and for skopt’s RNG, when available).
     skopt_kind : {"auto","gp","forest","gbrt","random"}, optional
-        Which :mod:`skopt` backend to use when available.
+        Choice of :mod:`skopt` backend. Default ``"auto"`` (GP).
     aggregator : {"mean","median","min","max"}, optional
-        Aggregation function :math:`\phi` for per-track losses.
+        Aggregation :math:`\phi` used to combine per-track losses. Default ``"mean"``.
     n_best_tracks : int, optional
-        If > 0, aggregate over the best ``n_best_tracks``; otherwise all tracks.
+        If ``> 0``, aggregate over the best *N* tracks (builder’s own ranking);
+        if ``0`` or ``None``, use **all** completed tracks. Default ``5``.
     tol : float, optional
-        Distance tolerance (meters) forwarded to per-track metrics.
+        Euclidean tolerance (meters) forwarded to per-track metrics such as
+        recall/precision. Default ``0.005``.
+    plot_path : pathlib.Path or None, optional
+        Where to save the PNG history plot of trial values. Defaults to
+        ``"opt_progress.png"`` in the current working directory.
 
     Returns
     -------
     OptResult
-        Best parameters, best (lowest) objective value, and a trial history.
+        Dataclass with fields
+        ``best_params`` (``Dict[str, Any]``),
+        ``best_value`` (``float``),
+        ``history`` (``List[{"value": float, "params": dict, "time_s": float}]``).
 
     Notes
     -----
-    - Failures during building assign a large penalty (``1e6``) but do not stop
-      the search.
-    - When optimizing by event **score**, all completed tracks are used to build
-      the submission for evaluation irrespective of ``n_best_tracks``.
-    """
+    - **Higher-is-better metrics.** For metrics like recall, precision and F1 the
+    routine minimizes the *complement* as in :math:`L(v)=1-v` (fractions) or
+    :math:`100-v` (percentages).  For MSE/RMSE the raw value is minimized.
+    - **Score objective.** When ``metric="score"``, a full submission is built from
+    all completed tracks and the loss :math:`1/\mathrm{score}` is minimized.
+    - **Failure handling.** Any exception during a trial returns a penalty of
+    ``1e6`` (trial logged and the search continues).
+    - **Reproducibility.** Set ``rng_seed`` for deterministic sampling; parallel
+    scheduling and internal BLAS/threads can still introduce run-to-run jitter.
+    - **Side effects.** Prints a live progress line, logs summary messages, and
+    writes a PNG plot to ``plot_path``.
+
+    Warnings
+    --------
+    - The “best-N tracks” selection influences the objective landscape; consider
+    using ``n_best_tracks=0`` to aggregate over **all** completed tracks when the
+    number of tracks per trial varies substantially.
+    - Tight gating or small seed caps (``max_seeds``) can bias the optimizer
+    toward overly conservative configurations.
+
+    See Also
+    --------
+    evaluate_once : Single evaluation pipeline producing one scalar objective.
+    ParamDef : Search-space parameter specification (name, type, bounds, log, choices).
+    CollaborativeParallelTrackBuilder : Multithreaded builder with shared hit ownership.
+
+    Examples
+    --------
+    Minimal run (single-threaded EKF, MSE):
+
+    >>> from pathlib import Path
+    >>> res = optimize_brancher(
+    ...     hit_pool=hit_pool,
+    ...     base_config=config,
+    ...     brancher_key="ekf",
+    ...     space_path=Path("param_space.json"),
+    ...     metric="mse",
+    ...     iterations=60,
+    ...     n_init=12,
+    ...     max_seeds=200,
+    ...     rng_seed=42,
+    ... )
+    >>> res.best_value, sorted(res.best_params.keys())[:3]  # doctest: +SKIP
+
+    Parallel SA optimizing F1 over the best 5 tracks, with history plot:
+
+    >>> res = optimize_brancher(
+    ...     hit_pool=hit_pool,
+    ...     base_config=config,
+    ...     brancher_key="sa",
+    ...     space_path=Path("param_space.json"),
+    ...     metric="f1",
+    ...     iterations=250,
+    ...     n_init=20,
+    ...     use_parallel=True,
+    ...     parallel_time_budget=0.03,
+    ...     max_seeds=200,
+    ...     aggregator="mean",
+    ...     n_best_tracks=5,
+    ...     tol=0.005,
+    ...     rng_seed=123,
+    ...     plot_path=Path("sa_progress.png"),
+    ... )  # doctest: +SKIP
+    '''
     rng = np.random.default_rng(rng_seed)
     space = _load_space(space_path, brancher_key)
 
     history: List[Dict[str, Any]] = []
+    values: List[float] = []
     best_val = float("inf")
     best_params: Dict[str, Any] = {}
 
     n_trials_total = int(iterations)
     trial_idx = 0
+    last3 = deque(maxlen=3)
+    par_str = str(bool(use_parallel)).lower()
+    bar_w = 24
+    metric_lower = _normalize_metric_name(metric)
+
+    def update_progress(val: float, dur: float) -> None:
+        r'''
+        Update the live progress line with current trial statistics.
+
+        Given the newest objective value :math:`v_t` and wall-clock duration
+        :math:`d_t` for trial :math:`t`, this helper:
+
+        1. Appends :math:`v_t` to the running sequence ``values`` and :math:`d_t` to a
+        bounded deque ``last3`` (size 3).
+        2. Computes the running mean
+        :math:`\overline{v} = \tfrac{1}{t}\sum_{i=1}^{t} v_i`.
+        3. Estimates the remaining time (ETA) by multiplying the average of the most
+        recent durations by the number of trials left:
+
+        .. math::
+            \mathrm{ETA} \;=\;
+            \bigg(\frac{1}{K}\sum_{j=0}^{K-1} d_{t-j}\bigg)\;
+            \max(0, N_{\text{tot}} - t),
+            \qquad K=\min(t,3).
+
+        4. Renders a compact progress bar with :func:`_render_bar` and writes a
+        single in-place console line via :func:`_print_progress_line`.
+
+        Parameters
+        ----------
+        val : float
+            The objective value for the current trial (:math:`v_t`).
+        dur : float
+            The wall-clock duration (seconds) for the current trial (:math:`d_t`).
+
+        Notes
+        -----
+        - This function **mutates** the surrounding closure: it appends to
+        ``values`` and ``last3`` and uses read-only access to variables such as
+        ``trial_idx``, ``n_trials_total``, ``bar_w``, ``metric_lower`` and
+        ``par_str``.
+        - Output formatting includes the running mean of the metric, the per-trial
+        duration, a human-friendly ETA (via :func:`_fmt_time`), and a textual bar.
+        - Coloring of the bar is applied only on ANSI-capable TTYs (see :func:`_isatty`).
+
+        See Also
+        --------
+        _render_bar : Text progress bar renderer.
+        _print_progress_line : In-place console line writer.
+        _fmt_time : Seconds to ``H:MM:SS``/``MM:SS`` formatter.
+        '''
+        values.append(val)
+        last3.append(dur)
+        mean_val = float(np.mean(values))
+        eta = (np.mean(last3) * max(n_trials_total - trial_idx, 0)) if len(last3) else 0.0
+
+        # progress bar + explicit percent text
+        bar = _render_bar(trial_idx, n_trials_total, width=bar_w)
+        pct = int(round(100.0 * min(max(trial_idx, 0), n_trials_total) / max(n_trials_total, 1)))
+        pct_str = f"{pct:3d}%"
+
+        line = (f"[opt/{brancher_key}] "
+                f"trial {trial_idx}/{n_trials_total} | "
+                f"mean {metric_lower}={mean_val:.6g} | "
+                f"{dur:.2f}s | parallel={par_str} | ETA {_fmt_time(eta)} | "
+                f"{bar} {pct_str}")
+        _print_progress_line(line)
 
     def run_params(pdict: Dict[str, Any]) -> Tuple[float, float]:
+        r'''
+        Evaluate a single parameter vector and update the running optimum.
+
+        This helper performs one optimization **trial**:
+
+        1. Increments the global trial index :math:`t \leftarrow t+1`.
+        2. Measures start time, evaluates the scalar objective :math:`f(\theta)` for
+        the provided parameter dictionary :math:`\theta` via :func:`evaluate_once`,
+        and records the elapsed duration.
+        3. Appends a history record ``{"value": f(θ), "params": θ, "time_s": Δt}``.
+        4. Calls :func:`update_progress` to refresh the live console line.
+        5. If :math:`f(\theta)` improves the best-so-far value, updates
+        ``best_val`` and ``best_params``.
+
+        Formally, letting :math:`f` denote the objective being minimized (e.g.,
+        :math:`f=\mathrm{MSE}`, or :math:`f = 1/\text{TrackML score}`), the update is
+
+        .. math::
+        \text{if }\; f(\theta) < f^\star \;\text{ then }\;
+        f^\star \leftarrow f(\theta), \quad \theta^\star \leftarrow \theta,
+
+        where :math:`(f^\star,\theta^\star)` are the incumbent best value and params.
+
+        Parameters
+        ----------
+        pdict : dict
+            Parameter dictionary :math:`\theta` to evaluate. Keys and types must
+            match the brancher's expected configuration (see the search space JSON).
+
+        Returns
+        -------
+        value : float
+            The scalar objective :math:`f(\theta)` returned by :func:`evaluate_once`.
+        duration : float
+            Wall-clock seconds taken to evaluate :math:`f(\theta)`.
+
+        Side Effects
+        ------------
+        - Mutates the surrounding closure: ``trial_idx``, ``best_val``,
+        ``best_params``, and the list ``history``.
+        - Emits a debug log line upon improvement (via :mod:`logging`).
+
+        Notes
+        -----
+        - The objective internally depends on the selected metric (e.g., ``"mse"``,
+        ``"rmse"``, ``"recall"``, ``"precision"``, ``"f1"``, or ``"score"``) and on
+        the aggregation policy passed to :func:`evaluate_once`.
+        - Exceptions inside :func:`evaluate_once` are handled there by assigning a
+        large penalty, allowing the search to continue robustly.
+
+        See Also
+        --------
+        evaluate_once : Build tracks and compute the scalar objective for a parameter set.
+        update_progress : Refresh the live progress display after each trial.
+        '''
         nonlocal best_val, best_params, trial_idx
         trial_idx += 1
         t0 = time.time()
@@ -711,22 +1336,15 @@ def optimize_brancher(
             aggregator=aggregator,
             n_best_tracks=n_best_tracks,
             tol=tol,
+            suppress_builder_prints=True
         )
         dur = time.time() - t0
-
-        scope = "all" if not n_best_tracks or n_best_tracks <= 0 else f"best {n_best_tracks}"
-        logger.info(
-            "[opt/%s] trial %d/%d | %s(%s over %s)=%.6g | %.2fs | parallel=%s | %s",
-            brancher_key, trial_idx, n_trials_total,
-            metric, aggregator, scope, val, dur, use_parallel, _param_preview(pdict)
-        )
-
+        history.append({"value": float(val), "params": dict(pdict), "time_s": float(dur)})
+        update_progress(val, dur)
         if val < best_val:
             best_val, best_params = float(val), dict(pdict)
-            logger.info(
-                "[opt/%s] new best at trial %d/%d | %s=%.6g",
-                brancher_key, trial_idx, n_trials_total, metric, best_val
-            )
+            logger.debug("[opt/%s] new best at trial %d/%d | %s=%.6g",
+                         brancher_key, trial_idx, n_trials_total, metric_lower, best_val)
         return float(val), float(dur)
 
     # Try scikit-optimize when available
@@ -753,8 +1371,7 @@ def optimize_brancher(
 
         def objective(vec: List[Any]) -> float:
             pdict = {k: v for k, v in zip(names, vec)}
-            val, dur = run_params(pdict)
-            history.append({"value": float(val), "params": pdict, "time_s": float(dur)})
+            val, _ = run_params(pdict)
             return float(val)
 
         algo = {
@@ -782,8 +1399,7 @@ def optimize_brancher(
         n_init_eff = max(1, int(n_init))
         for _ in range(n_init_eff):
             pdict = _random_point(space, rng)
-            val, dur = run_params(pdict)
-            history.append({"value": float(val), "params": pdict, "time_s": float(dur)})
+            run_params(pdict)
 
         # Local perturbations around current best
         remain = max(0, int(iterations) - n_init_eff)
@@ -806,8 +1422,18 @@ def optimize_brancher(
                         candidate[p.name] = rng.choice(p.choices)
                     elif p.kind == "bool":
                         candidate[p.name] = not bool(candidate.get(p.name, False))
-            val, dur = run_params(candidate)
-            history.append({"value": float(val), "params": candidate, "time_s": float(dur)})
+            run_params(candidate)
+
+    # finalize progress line
+    _finish_progress_line()
+
+    # Save history plot
+    out_path = Path(plot_path) if plot_path else Path("opt_progress.png")
+    try:
+        _plot_history(history, metric_lower, out_path)
+        logger.info("Optimization history plot saved to %s", out_path)
+    except Exception:
+        logger.exception("Failed to save optimization history plot to %s", out_path)
 
     scope = "all" if not n_best_tracks or n_best_tracks <= 0 else f"best {n_best_tracks}"
     logger.info(

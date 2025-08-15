@@ -69,7 +69,7 @@ import trackml_reco.metrics as trk_metrics
 from trackml_reco.profiling import prof
 
 # Optimizer (imported here to keep main self-contained)
-from trackml_reco.optimize import optimize_brancher  # <- new
+from trackml_reco.optimize import optimize_brancher
 
 try:
     import orjson as _orjson
@@ -127,7 +127,7 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Display extra presentation plots (default: False).")
     p.add_argument("--parallel", action="store_true", default=True,
                    help="Enable collaborative parallel track building (default: False).")
-    p.add_argument("-b", "--brancher", type=str, choices=BRANCHER_KEYS, default="ekf",
+    p.add_argument("-b", "--brancher", type=str, choices=BRANCHER_KEYS, default="astar",
                    metavar="BRANCHER",
                    help="Branching strategy: ekf | astar | aco | pso | sa | ga | hungarian (default: ekf)")
     p.add_argument("--config", type=str, default="config.json",
@@ -163,6 +163,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--opt-skopt-kind", type=str, default="forest",
                    choices=("auto", "gp", "forest", "gbrt", "random"),
                    help="Which skopt backend to use if available (default: auto).")
+    p.add_argument("--opt-plot", type=str, default=None,
+                   help="Path to save the optimization history plot (e.g. opt_progress.png).")
     p.add_argument("--opt-aggregator", type=str, default="mean",
                    choices=("mean", "median", "min", "max"),
                    help="Aggregator for per-track metrics during optimization (default: mean).")
@@ -460,7 +462,7 @@ def main() -> None:
         args.plot, args.extra_plots = False, False
         apply_plotting_guard(False)
 
-        logging.info("=== Optimization mode ON ===")
+        logging.info("==== Optimization mode ON ====")
         logging.info("Brancher: %s  |  Metric: %s", brancher_key, args.opt_metric)
 
         result = optimize_brancher(
@@ -479,6 +481,7 @@ def main() -> None:
             aggregator=args.opt_aggregator,
             n_best_tracks=args.opt_n_best_tracks,
             tol=args.opt_tol,
+            plot_path=Path(args.opt_plot) if args.opt_plot else None,
         )
 
         logging.info("Best objective (lower is better): %.6f", result.best_value)

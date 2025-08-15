@@ -1,14 +1,14 @@
 {
   "ekf_config": {
     "layer_surfaces": null,
-    "noise_std": 1.0,
+    "noise_std": 0.1,
     "B_z": 0.002,
     "num_branches": 30,
     "survive_top": 12,
-    "max_cands": 10,
-    "step_candidates": 5,
-    "gate_multiplier": 3.0,
-    "gate_tighten": 0.15,
+    "max_cands": 11,
+    "step_candidates": 1,
+    "gate_multiplier": 2.7859920582472504,
+    "gate_tighten": 0.12125294165469355,
     "build_graph": false
   },
 
