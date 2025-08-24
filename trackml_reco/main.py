@@ -41,8 +41,11 @@ from __future__ import annotations
 import argparse
 import copy
 import json
+import time
 import logging
 import os
+import re
+from glob import glob
 from pathlib import Path
 from typing import Dict, List, Mapping, MutableMapping, Optional, Tuple
 
@@ -112,9 +115,22 @@ def build_parser() -> argparse.ArgumentParser:
       :func:`trackml_reco.optimize.optimize_brancher`. See that function for the
       precise meaning of ``--opt-metric``, search backend selection, and history output.
     """
-    p = argparse.ArgumentParser(description="Run refactored track building on a TrackML event.")
-    p.add_argument("-f", "--file", type=str, default="train_1.zip",
-                   help="Input TrackML .zip event (default: train_1.zip).")
+    p = argparse.ArgumentParser(description="Run refactored track building on TrackML event(s).")
+    p.add_argument(
+        "-f", "--file", type=str, default="train_1.zip",
+        help=(
+            "Input TrackML .zip event, a directory containing *.zip, or a glob "
+            "(e.g. data/train_*.zip). Default: train_1.zip"
+        ),
+    )
+    p.add_argument(
+        "-n", "--n-events", type=int, default=2,
+        help=(
+            "Number of events to run. When --file is a directory or glob, take the "
+            "first N matches (natural order). When --file is a single zip, start at "
+            "that file and continue through its siblings. Default: 1."
+        ),
+    )
     p.add_argument("-p", "--pt", type=float, default=2.0,
                    help="Minimum pT threshold in GeV (default: 2.0).")
     p.add_argument("-d", "--debug-n", type=int, default=None,
@@ -138,6 +154,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="If set, write pstats text to this file.")
     p.add_argument("-v", "--verbose", action="store_true",
                    help="Enable verbose logging.")
+
+    # Optimization block
     p.add_argument("--optimize", action="store_true", default=False,
                    help="Run parameter optimization for the selected brancher instead of a single build.")
     p.add_argument("--opt-metric", type=str, default="mse",
@@ -212,11 +230,9 @@ def apply_plotting_guard(enable_plots: bool) -> None:
     if enable_plots:
         return
     os.environ.setdefault("MPLBACKEND", "Agg")
-    # Delay importing matplotlib until now to enforce backend
     import matplotlib
     matplotlib.use("Agg", force=True)
-    # Hard-disable interactive mode / show()
-    import matplotlib.pyplot as _plt  # noqa: WPS433 (local import intentional)
+    import matplotlib.pyplot as _plt  # noqa: WPS433
     _plt.ioff()
     _plt.show = lambda *a, **k: None  # type: ignore[assignment]
 
@@ -258,12 +274,8 @@ def compute_layer_surfaces(hits: pd.DataFrame) -> Dict[Tuple[int, int], Mapping[
             continue
         z_vals = df["z"].to_numpy()
         z_span = float(z_vals.max() - z_vals.min())
-
-        x = df["x"].to_numpy()
-        y = df["y"].to_numpy()
-        r = np.hypot(x, y)
+        r = np.hypot(df["x"].to_numpy(), df["y"].to_numpy())
         r_span = float(r.max() - r.min())
-
         if z_span < 0.1 * r_span:
             surfaces[(vol, lay)] = {
                 "type": "disk",
@@ -271,10 +283,7 @@ def compute_layer_surfaces(hits: pd.DataFrame) -> Dict[Tuple[int, int], Mapping[
                 "p": np.array([0.0, 0.0, float(z_vals.mean())]),
             }
         else:
-            surfaces[(vol, lay)] = {
-                "type": "cylinder",
-                "R": float(r.mean()),
-            }
+            surfaces[(vol, lay)] = {"type": "cylinder", "R": float(r.mean())}
     return surfaces
 
 
@@ -383,6 +392,48 @@ def _deep_update(d: dict, u: dict) -> dict:
     return out
 
 
+def _natural_key(path: Path):
+    """Natural sort key (split digits) so train_2 comes before train_10."""
+    parts = re.split(r"(\d+)", path.name)
+    return [int(p) if p.isdigit() else p.lower() for p in parts]
+
+def _resolve_event_paths(file_arg: str, n_events: int) -> List[Path]:
+    """
+    Turn --file into a list of up to n_events .zip paths.
+
+    Supports:
+      - single zip path
+      - directory (we take *.zip inside)
+      - glob pattern with * ? [ ]
+
+    For a single zip with n_events>1, we continue through siblings in the same
+    directory (natural order) starting at the provided file.
+    """
+    n = max(1, int(n_events))
+    s = file_arg
+    p = Path(s)
+
+    # glob pattern?
+    if any(ch in s for ch in "*?[]"):
+        cands = sorted((Path(x) for x in glob(s)), key=_natural_key)
+        return cands[:n]
+
+    # directory?
+    if p.is_dir():
+        cands = sorted(p.glob("*.zip"), key=_natural_key)
+        return cands[:n]
+
+    # single file
+    if p.is_file():
+        sibs = sorted(p.parent.glob("*.zip"), key=_natural_key)
+        if p in sibs:
+            i = sibs.index(p)
+            return sibs[i:i+n]
+        return [p]  # fall back
+    # otherwise just return as provided (will error later if invalid)
+    return [p]
+
+
 def main() -> None:
     r"""
     End-to-end TrackML pipeline: **load → preprocess → geometry → branch → build → score**.
@@ -423,40 +474,44 @@ def main() -> None:
     args = parser.parse_args()
     setup_logging(args.verbose)
 
+    # Resolve events
+    event_paths = _resolve_event_paths(args.file, args.n_events)
+    if not event_paths:
+        raise FileNotFoundError(f"No events found for --file={args.file}")
+    if len(event_paths) > 1:
+        logging.info("Running on %d events. First: %s", len(event_paths), event_paths[0].name)
+    else:
+        logging.info("Running on event: %s", event_paths[0].name)
+
+    # If optimizing across many events, keep API unchanged for now: use first only.
+    if args.optimize and len(event_paths) > 1:
+        logging.warning("Optimize mode uses only the first event (%s); ignoring %d others.",
+                        event_paths[0].name, len(event_paths) - 1)
+        event_paths = event_paths[:1]
+
     apply_plotting_guard(args.plot or args.extra_plots)
 
-    logging.info("Loading & preprocessing data...")
-    hit_pool = trk_data.load_and_preprocess(args.file, pt_threshold=args.pt)
-    hits, pt_cut_hits = hit_pool.hits, hit_pool.pt_cut_hits
-
-    logging.info("Inferring layer surfaces...")
-    layer_surfaces = compute_layer_surfaces(hits)
-
-    # Lazy import plotting only if needed (prevents accidental pyplot usage)
-    if args.plot or args.extra_plots:
-        import trackml_reco.plotting as trk_plot  # noqa: WPS433
-        trk_plot.plot_extras(hits, pt_cut_hits, enabled=args.extra_plots)
-
-    # Load config
+    # Load config once
     cfg_path = Path(args.config)
     logging.info("Reading config from %s", cfg_path)
     config = load_config(cfg_path)
 
-    # Attach geometry to any present brancher configs
-    inject_layer_surfaces_into_configs(config, layer_surfaces)
-
-    # Select brancher & config section
-    brancher_key = args.brancher
-    brancher_cls = BRANCHER_MAP[brancher_key]
-    brancher_config_key = resolve_brancher_config_key(brancher_key)
-
-    if brancher_config_key not in config:
-        raise KeyError(
-            f"Missing '{brancher_config_key}' in {cfg_path}. "
-            f"Available keys: {', '.join(config.keys())}"
-        )
-
+    # --------- OPTIMIZE MODE ---------
     if args.optimize:
+        # Load first event for optimization pipeline
+        logging.info("Loading & preprocessing data for optimization: %s", event_paths[0].name)
+        hit_pool = trk_data.load_and_preprocess(str(event_paths[0]), pt_threshold=args.pt)
+
+        logging.info("Inferring layer surfaces...")
+        layer_surfaces = compute_layer_surfaces(hit_pool.hits)
+        inject_layer_surfaces_into_configs(config, layer_surfaces)
+
+        brancher_key = args.brancher
+        brancher_config_key = resolve_brancher_config_key(brancher_key)
+        if brancher_config_key not in config:
+            raise KeyError(f"Missing '{brancher_config_key}' in {cfg_path}. "
+                           f"Available keys: {', '.join(config.keys())}")
+
         # hard-disable any plotting during optimization
         plots_prev = (args.plot, args.extra_plots)
         args.plot, args.extra_plots = False, False
@@ -488,6 +543,7 @@ def main() -> None:
         logging.info("Best params: %s", result.best_params)
 
         # write best full-config if requested
+        brancher_config_key = resolve_brancher_config_key(args.brancher)
         if args.opt_out:
             out_cfg = copy.deepcopy(config)
             out_cfg[brancher_config_key] = _deep_update(
@@ -502,7 +558,6 @@ def main() -> None:
             rows = []
             for h in result.history:
                 row = {"value": h["value"], "time_s": h["time_s"]}
-                # flatten params with prefix
                 for k, v in h["params"].items():
                     row[f"p::{k}"] = v
                 rows.append(row)
@@ -513,103 +568,171 @@ def main() -> None:
         args.plot, args.extra_plots = plots_prev
         return
 
-    # Choose builder
-    builder_cls = CollaborativeParallelTrackBuilder if args.parallel else TrackBuilder
-    logging.info(
-        "Building with brancher=%s (%s), parallel=%s",
-        brancher_key,
-        brancher_cls.__name__,
-        args.parallel,
-    )
-    brancher_cfg = dict(config[brancher_config_key])  # copy; we may read defaults
-    # sensible fallbacks if ekf_config carries global knobs used by CLI
-    ekf_defaults = config.get("ekf_config", {})
-    num_branches = int(brancher_cfg.get("num_branches", ekf_defaults.get("num_branches", 30)))
-    survive_top = int(brancher_cfg.get("survive_top", ekf_defaults.get("survive_top", 12)))
+    # --------- BUILD MODE (possibly multiple events) ---------
+    brancher_key = args.brancher
+    brancher_cls = BRANCHER_MAP[brancher_key]
+    brancher_config_key = resolve_brancher_config_key(brancher_key)
+    if brancher_config_key not in config:
+        raise KeyError(f"Missing '{brancher_config_key}' in {cfg_path}. "
+                       f"Available keys: {', '.join(config.keys())}")
 
-    track_builder = builder_cls(
-        hit_pool=hit_pool,
-        brancher_cls=brancher_cls,
-        brancher_config=brancher_cfg,
-    )
+    # Aggregates across events
+    scores_all: List[float] = []
+    mses_all: List[float] = []
+    pct_hits_all: List[float] = []
 
-    # Build tracks
-    with prof(args.profile, out_path=args.profile_out):
-        logging.info("Building seeds & tracks from truth hits...")
-        completed_tracks = track_builder.build_tracks_from_truth(
-            max_seeds=args.debug_n,
-            max_tracks_per_seed=num_branches,
-            max_branches=survive_top,
+    for idx, ev_path in enumerate(event_paths, start=1):
+        logging.info("=== Event %d/%d: %s ===", idx, len(event_paths), ev_path.name)
+
+        # ---- timing: start of event
+        t_load0 = time.time()
+
+        logging.info("Loading & preprocessing data...")
+        hit_pool = trk_data.load_and_preprocess(str(ev_path), pt_threshold=args.pt)
+        hits, pt_cut_hits = hit_pool.hits, hit_pool.pt_cut_hits
+        t_load1 = time.time()
+
+        logging.info("Inferring layer surfaces...")
+        layer_surfaces = compute_layer_surfaces(hits)
+        t_surf1 = time.time()
+
+        # Lazy import plotting only on the FIRST event to avoid a flood of windows
+        if idx == 1 and (args.plot or args.extra_plots):
+            import trackml_reco.plotting as trk_plot  # noqa: WPS433
+            trk_plot.plot_extras(hits, pt_cut_hits, enabled=args.extra_plots)
+
+        # Attach geometry to any present brancher configs (copy brancher block)
+        cfg_local = copy.deepcopy(config)
+        inject_layer_surfaces_into_configs(cfg_local, layer_surfaces)
+
+        # Choose builder
+        builder_cls = CollaborativeParallelTrackBuilder if args.parallel else TrackBuilder
+        logging.info(
+            "Building with brancher=%s (%s), parallel=%s",
+            brancher_key, brancher_cls.__name__, args.parallel,
+        )
+        brancher_cfg = dict(cfg_local[brancher_config_key])  # copy; we may read defaults
+        ekf_defaults = cfg_local.get("ekf_config", {})
+        num_branches = int(brancher_cfg.get("num_branches", ekf_defaults.get("num_branches", 30)))
+        survive_top = int(brancher_cfg.get("survive_top", ekf_defaults.get("survive_top", 12)))
+
+        track_builder = builder_cls(
+            hit_pool=hit_pool,
+            brancher_cls=brancher_cls,
+            brancher_config=brancher_cfg,
         )
 
-    # Seed plots (lazy-import plotting)
-    if args.plot:
-        import trackml_reco.plotting as trk_plot  # noqa: WPS433
-        trk_plot.plot_seeds(track_builder, show=True, max_seeds=args.debug_n)
+        # Build tracks
+        t_build0 = time.time()
+        with prof(args.profile, out_path=args.profile_out):
+            logging.info("Building seeds & tracks from truth hits...")
+            completed_tracks = track_builder.build_tracks_from_truth(
+                max_seeds=args.debug_n,
+                max_tracks_per_seed=num_branches,
+                max_branches=survive_top,
+            )
+        t_build1 = time.time()
 
-    # Stats
-    stats = track_builder.get_track_statistics()
-    logging.info("Track building statistics:")
-    for k, v in stats.items():
-        logging.info("  %s: %s", k, v)
+        # Seed plots (only for first event)
+        if idx == 1 and args.plot:
+            import trackml_reco.plotting as trk_plot  # noqa: WPS433
+            trk_plot.plot_seeds(track_builder, show=True, max_seeds=args.debug_n)
 
-    # Evaluate best tracks
-    n_best = min(10, len(completed_tracks))
-    best_tracks = track_builder.get_best_tracks(n=n_best)
-    logging.info("Evaluating best %d tracks...", n_best)
+        # Stats
+        stats = track_builder.get_track_statistics()
+        logging.info("Track building statistics:")
+        for k, v in stats.items():
+            logging.info("  %s: %s", k, v)
 
-    submission_rows: List[dict] = []
-    mses: List[float] = []
-    pct_hits_list: List[float] = []
+        # Evaluate best tracks
+        t_eval0 = time.time()
+        n_best = min(10, len(completed_tracks))
+        best_tracks = track_builder.get_best_tracks(n=n_best)
+        logging.info("Evaluating best %d tracks...", n_best)
 
-    for i, track in enumerate(best_tracks, start=1):
-        truth_particle = pt_cut_hits[pt_cut_hits.particle_id == track.particle_id]
-        if truth_particle.empty:
+        submission_rows: List[dict] = []
+        mses: List[float] = []
+        pct_hits_list: List[float] = []
+
+        for i, track in enumerate(best_tracks, start=1):
+            truth_particle = pt_cut_hits[pt_cut_hits.particle_id == track.particle_id]
+            if truth_particle.empty:
+                continue
+
+            traj = np.asarray(track.trajectory, dtype=float)
+            truth_xyz = truth_particle[["x", "y", "z"]].to_numpy(dtype=float, copy=False)
+
+            m = trk_metrics.compute_metrics(
+                traj, truth_xyz, tol=0.005,
+                names=("mse", "recall", "precision", "f1")
+            )
+            mse, recall, precision, f1 = trk_metrics.unpack(m, "mse", "recall", "precision", "f1")
+
+            mses.append(mse)
+            pct_hits_list.append(recall)  # recall (%) == your “% hits”
+
+            logging.info(
+                "Track %d (PID=%s): MSE=%.3f | recall=%.1f%% | precision=%.1f%% | F1=%.1f%%",
+                i, track.particle_id, mse, recall, precision, f1
+            )
+
+            for hid in track.hit_ids:
+                submission_rows.append({"hit_id": int(hid), "track_id": int(track.particle_id)})
+
+            if idx == 1 and args.plot and i <= 3:
+                import trackml_reco.plotting as trk_plot  # noqa: WPS433
+                trk_plot.plot_best_track_3d(track_builder, track, truth_particle, i)
+
+        # If nothing built, still finalize timing and (optionally) show timing plot
+        if not submission_rows:
+            t_eval1 = time.time()
+            # Timing summary (first event only to avoid many windows)
+            if idx == 1 and args.plot:
+                import trackml_reco.plotting as trk_plot  # noqa: WPS433
+                timing = {
+                    "load+preprocess": t_load1 - t_load0,
+                    "layer surfaces":   t_surf1 - t_load1,
+                    "build":            t_build1 - t_build0,
+                    "evaluation":       t_eval1 - t_eval0,
+                }
+                trk_plot.plot_timing_summary(timing, title=f"Pipeline timing ({ev_path.name})")
+            logging.warning("No tracks were successfully built for event %s.", ev_path.name)
             continue
 
-        traj = np.asarray(track.trajectory, dtype=float)
-        truth_xyz = truth_particle[["x", "y", "z"]].to_numpy(dtype=float, copy=False)
+        submission_df = pd.DataFrame(submission_rows).drop_duplicates("hit_id")
 
-        # compute only what you’ll log/aggregate; add/remove names freely
-        m = trk_metrics.compute_metrics(
-            traj, truth_xyz, tol=0.005,
-            names=("mse", "recall", "precision", "f1")
+        score = score_event(
+            pt_cut_hits[["hit_id", "particle_id", "weight"]],
+            submission_df,
         )
-        mse, recall, precision, f1 = trk_metrics.unpack(m, "mse", "recall", "precision", "f1")
+        t_eval1 = time.time()
 
-        mses.append(mse)
-        pct_hits_list.append(recall)  # recall (%) == your “% hits”
+        if mses:
+            logging.info("Event %s: Average MSE over %d tracks: %.3f", ev_path.name, len(mses), float(np.mean(mses)))
+            mses_all.append(float(np.mean(mses)))
+        if pct_hits_list:
+            logging.info("Event %s: Average %%hits over %d tracks: %.1f%%",
+                         ev_path.name, len(pct_hits_list), float(np.mean(pct_hits_list)))
+            pct_hits_all.append(float(np.mean(pct_hits_list)))
+        logging.info("Event %s: Score: %s", ev_path.name, score)
+        scores_all.append(float(score))
 
-        logging.info(
-            "Track %d (PID=%s): MSE=%.3f | recall=%.1f%% | precision=%.1f%% | F1=%.1f%%",
-            i, track.particle_id, mse, recall, precision, f1
-        )
-
-
-        for hid in track.hit_ids:
-            submission_rows.append({"hit_id": int(hid), "track_id": int(track.particle_id)})
-
-        if args.plot and i <= 3:
+        # Timing summary (first event only to avoid many windows)
+        if idx == 1 and args.plot:
             import trackml_reco.plotting as trk_plot  # noqa: WPS433
-            trk_plot.plot_best_track_3d(track_builder, track, truth_particle, i)
+            timing = {
+                "load+preprocess": t_load1 - t_load0,
+                "layer surfaces":   t_surf1 - t_load1,
+                "build":            t_build1 - t_build0,
+                "evaluation":       t_eval1 - t_eval0,
+            }
+            trk_plot.plot_timing_summary(timing, title=f"Pipeline timing ({ev_path.name})")
 
-    if not submission_rows:
-        logging.warning("No tracks were successfully built.")
-        return
-
-    submission_df = pd.DataFrame(submission_rows).drop_duplicates("hit_id")
-
-    score = score_event(
-        pt_cut_hits[["hit_id", "particle_id", "weight"]],
-        submission_df,
-    )
-
-    if mses:
-        logging.info("Average MSE over %d tracks: %.3f", len(mses), float(np.mean(mses)))
-    if pct_hits_list:
-        logging.info("Average %%hits over %d tracks: %.1f%%", len(pct_hits_list), float(np.mean(pct_hits_list)))
-    logging.info("Event score: %s", score)
-
-
-if __name__ == "__main__":
-    main()
+    # Aggregate across events
+    if len(scores_all) > 1:
+        logging.info("=== Aggregate over %d events ===", len(scores_all))
+        logging.info("Mean score: %.6f", float(np.mean(scores_all)))
+        if mses_all:
+            logging.info("Mean of per-event avg MSE: %.6f", float(np.mean(mses_all)))
+        if pct_hits_all:
+            logging.info("Mean of per-event avg %%hits: %.3f%%", float(np.mean(pct_hits_all)))

@@ -2,6 +2,32 @@
 
 Fast, headless-safe TrackML reconstruction with a helical EKF core and a family of meta-heuristics (A*, ACO, GA, PSO, SA, per-layer Hungarian). The pipeline is vectorized/NumPy-first, exploits robust Cholesky factorizations (no explicit matrix inverses), and scales via collaborative multithreading with conflict-free shared hit ownership. It ships an optimizer to tune brancher hyper-parameters on your event(s).
 
+## Getting Started
+
+0. **Set Up Environment** (Python ≥ 3.9):
+
+    ```bash
+    python -m venv .venv
+    source .venv/bin/activate
+    pip install -r requirements.txt
+    ```
+
+1. **Download Dataset**:
+
+     Obtain the TrackML Particle Identification dataset from the [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules) and place the desired event ``.zip`` files (e.g. ``train_1.zip``) in a known location. The reader accepts both zipped events and directories produced by unzipping.
+
+2. **Run Reconstruction**:
+
+     ```bash
+     python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --pt 2.0
+     ```
+
+     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,``ga``, ``hungarian``). Add ``--parallel`` to enable the collaborative track builder and ``--config`` to use a custom JSON configuration. Run ``python -m trackml_reco.main -h`` for the full list of options.
+
+3. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
+
+_Tip:_ Tune `noise_std`, `num_branches`, and gating thresholds (`gate_*`) in `config.json` to your detector geometry and occupancy.
+
 ## Mathematical model
 
 ### State, kinematics, and propagation
@@ -367,29 +393,3 @@ trackml_reco/
 33. R. E. Kalman. (1960). “A new approach to linear filtering and prediction problems”. Journal of Basic Engineering [Online]. vol 82, p. 35.
 34. V. Karimäki. (1991). “Effective circle fitting for particle trajectories”. Computer Physics Communications [Online]. vol 69, p. 137.
 35. S. Russell, P. Norvig. (2010). Artificial Intelligence: A Modern Approach, 3rd ed. Pearson.
-
-## Getting Started
-
-0. **Set Up Environment** (Python ≥ 3.9):
-
-    ```bash
-    python -m venv .venv
-    source .venv/bin/activate
-    pip install -r requirements.txt
-    ```
-
-1. **Download Dataset**:
-
-     Obtain the TrackML Particle Identification dataset from the [Kaggle competition page](https://www.kaggle.com/competitions/trackml-particle-identification/rules) and place the desired event ``.zip`` files (e.g. ``train_1.zip``) in a known location. The reader accepts both zipped events and directories produced by unzipping.
-
-2. **Run Reconstruction**:
-
-     ```bash
-     python -m trackml_reco.main --file path/to/train_1.zip --brancher ekf --pt 2.0
-     ```
-
-     Replace ``ekf`` with any brancher key (``astar``, ``aco``, ``pso``, ``sa``,``ga``, ``hungarian``). Add ``--parallel`` to enable the collaborative track builder and ``--config`` to use a custom JSON configuration. Run ``python -m trackml_reco.main -h`` for the full list of options.
-
-3. **Visualize**: plotting is enabled by default; add ``--no-plot`` to disable or ``--extra-plots`` for additional views of hits, seeds, and the branching tree.
-
-_Tip:_ Tune `noise_std`, `num_branches`, and gating thresholds (`gate_*`) in `config.json` to your detector geometry and occupancy.

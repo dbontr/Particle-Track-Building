@@ -1,5 +1,5 @@
 import logging
-from typing import Tuple, Dict, List, Optional
+from typing import Tuple, Dict, List, Optional, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
@@ -831,3 +831,92 @@ def _branch_to_traj(branch) -> np.ndarray:
     if out.ndim != 2 or out.shape[1] < 3:
         return np.empty((0, 3), dtype=np.float64)
     return out[:, :3]
+
+def plot_timing_summary(
+    timing: "Mapping[str, float] | Sequence[Tuple[str, float]] | pd.Series",
+    *,
+    title: str = "Pipeline timing",
+    annotate: bool = True,
+) -> None:
+    r'''
+    Plot a compact pipeline timing summary as a horizontal bar chart.
+
+    Given a mapping from pipeline stage names to wall-clock durations (in seconds),
+    this function renders a single horizontal bar chart with one bar per stage.
+    It is intended for quick, visual comparisons of where time is spent across the
+    major phases of the TrackML pipeline (e.g., load+preprocess, surface inference,
+    build, evaluation).
+
+    Parameters
+    ----------
+    timing : Mapping[str, float]
+        Dictionary-like object mapping stage names to durations in **seconds**.
+        Non-finite or negative values are coerced to zero for display purposes.
+    title : str or None, optional
+        Figure title. If ``None`` (default), a generic title is used.
+    show : bool, optional
+        If ``True`` (default), call :func:`matplotlib.pyplot.show` after drawing.
+        Set to ``False`` when you are saving the figure or composing into another
+        layout.
+    save_path : str or pathlib.Path or None, optional
+        If provided, the figure is saved to this path (e.g., ``"timing.png"``) via
+        :func:`matplotlib.figure.Figure.savefig`. The directory must exist.
+
+    Returns
+    -------
+    None
+        The figure is created for its side effects (optionally shown/saved).
+        If you need programmatic access to the figure/axes, adapt the function to
+        return them.
+
+    Notes
+    -----
+    - Bars are ordered from **longest to shortest** duration to emphasize the
+    dominant stages.
+    - Durations are annotated at the end of each bar in seconds with two decimals.
+    - The function relies on the **current Matplotlib backend**. In headless
+    contexts, ensure an Agg-like backend is active (the main script already
+    enforces this when plotting is disabled globally).
+    '''
+    # Normalize input into a list of (label, seconds)
+    if isinstance(timing, pd.Series):
+        items = [(str(k), float(v)) for k, v in timing.items()]
+    elif isinstance(timing, dict):
+        items = [(str(k), float(v)) for k, v in timing.items()]
+    else:
+        items = [(str(k), float(v)) for k, v in timing]
+
+    items = [(k, v) for k, v in items if np.isfinite(v) and v > 0.0]
+    if not items:
+        return
+
+    labels, secs = zip(*items)
+    secs = np.asarray(secs, dtype=float)
+    total = float(secs.sum())
+    perc = (secs / total) * 100.0 if total > 0 else np.zeros_like(secs)
+
+    # Figure size scales with number of stages
+    fig_h = max(3.0, 0.55 * len(labels) + 1.25)
+    fig, ax = plt.subplots(figsize=(8.6, fig_h))
+
+    bars = ax.barh(labels, secs, alpha=0.9)
+    ax.invert_yaxis()  # top item first
+    ax.set_xlabel("seconds")
+    ax.set_title(title)
+    ax.grid(True, axis="x", alpha=0.25)
+
+    if annotate:
+        for b, s, p in zip(bars, secs, perc):
+            x = b.get_width()
+            y = b.get_y() + b.get_height() / 2
+            label = f"{s:.2f}s • {p:.1f}%"
+            # place label inside the bar if there is space, else just outside
+            if x >= 0.20 * secs.max():
+                ax.text(x - 0.01 * secs.max(), y, label,
+                        va="center", ha="right", color="white", fontsize=9, fontweight="bold")
+            else:
+                ax.text(x + 0.01 * secs.max(), y, label,
+                        va="center", ha="left", color="black", fontsize=9)
+
+    plt.tight_layout()
+    _show_and_close(fig)
