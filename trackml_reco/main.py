@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
         ),
     )
     p.add_argument(
-        "-n", "--n-events", type=int, default=2,
+        "-n", "--n-events", type=int, default=1,
         help=(
             "Number of events to run. When --file is a directory or glob, take the "
             "first N matches (natural order). When --file is a single zip, start at "

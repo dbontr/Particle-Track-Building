@@ -28,6 +28,40 @@ Fast, headless-safe TrackML reconstruction with a helical EKF core and a family 
 
 _Tip:_ Tune `noise_std`, `num_branches`, and gating thresholds (`gate_*`) in `config.json` to your detector geometry and occupancy.
 
+### Command-line parameters
+
+| Flag | Description | Default |
+| --- | --- | --- |
+| `-f`, `--file` | Input TrackML `.zip` event | `train_1.zip` |
+| `-n`, `--n-events` | Number of events to load | `1` |
+| `-p`, `--pt` | Minimum pT threshold in GeV | `2.0` |
+| `-d`, `--debug-n` | Only process this many seeds | `None` |
+| `--plot` | Show seed/track plots | `False` |
+| `--no-plot` | Disable plotting | `False` |
+| `--extra-plots` | Display extra presentation plots | `False` |
+| `--parallel` | Enable collaborative parallel track building | `False` |
+| `-b`, `--brancher` | Branching strategy: `ekf`, `astar`, `aco`, `pso`, `sa`, `ga`, `hungarian` | `ekf` |
+| `--config` | Path to JSON config with per-brancher settings | `config.json` |
+| `--profile` | Enable cProfile around the build+score phase | `False` |
+| `--profile-out` | Write pstats text to this file | `None` |
+| `-v`, `--verbose` | Enable verbose logging | `False` |
+| `--optimize` | Run parameter optimization instead of a single build | `False` |
+| `--opt-metric` | Objective metric to minimize (e.g., `mse`, `rmse`, `recall`) | `mse` |
+| `--opt-iterations` | Number of optimization iterations | `40` |
+| `--opt-n-init` | Initial random points for Bayesian search | `10` |
+| `--opt-space` | Path to parameter space JSON | `param_space.json` |
+| `--opt-max-seeds` | Limit seeds per evaluation to speed up optimization | `200` |
+| `--opt-parallel` | Use `CollaborativeParallelTrackBuilder` during optimization | `False` |
+| `--opt-parallel-time-budget` | Per-seed time budget when `--opt-parallel` | `None` |
+| `--opt-seed` | Random seed for the optimizer | `None` |
+| `--opt-out` | Write best-tuned full config JSON to this path | `None` |
+| `--opt-history` | Write a CSV of trial history to this path | `None` |
+| `--opt-skopt-kind` | `skopt` backend (`auto`, `gp`, `forest`, `gbrt`, `random`) | `auto` |
+| `--opt-plot` | Save optimization history plot to this path | `None` |
+| `--opt-aggregator` | Aggregator for per-track metrics (`mean`, `median`, `min`, `max`) | `mean` |
+| `--opt-n-best-tracks` | Aggregate metric over best N tracks; 0 uses all tracks | `0` |
+| `--opt-tol` | Hit-matching tolerance for efficiency metrics | `0.005` |
+
 ## Mathematical model
 
 ### State, kinematics, and propagation
