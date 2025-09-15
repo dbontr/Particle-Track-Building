@@ -736,3 +736,5 @@ def main() -> None:
             logging.info("Mean of per-event avg MSE: %.6f", float(np.mean(mses_all)))
         if pct_hits_all:
             logging.info("Mean of per-event avg %%hits: %.3f%%", float(np.mean(pct_hits_all)))
+
+if __name__ == "__main__": main()

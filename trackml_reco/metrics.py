@@ -149,6 +149,59 @@ def _nn_dists(
     return np.asarray(d, dtype=np.float64)
 
 
+def _greedy_tp(
+    P: np.ndarray,
+    T: np.ndarray,
+    tol: float,
+    *,
+    n_jobs: Optional[int] = None,
+) -> int:
+    r"""Return the number of one-to-one matches within ``tol``.
+
+    Predictions ``P`` are greedily matched to truths ``T`` by ascending
+    distance, ensuring each truth contributes to at most one true positive.
+
+    Parameters
+    ----------
+    P : ndarray, shape (NP, 3)
+        Predicted points.
+    T : ndarray, shape (NT, 3)
+        Ground-truth points.
+    tol : float
+        Maximum distance (meters) for a match.
+    n_jobs : int or None, optional
+        Forwarded to :meth:`cKDTree.query` as ``workers=...``.
+
+    Returns
+    -------
+    int
+        Count of matched pairs ``(p_i, t_j)`` with ``||p_i - t_j||_2 <= tol``.
+    """
+    n_pred, n_true = len(P), len(T)
+    if n_pred == 0 or n_true == 0:
+        return 0
+
+    tree_T = cKDTree(T, balanced_tree=True, compact_nodes=True, copy_data=False)
+    kwargs = {}
+    if n_jobs is not None:
+        kwargs["workers"] = int(n_jobs)
+
+    dists, idxs = tree_T.query(P, k=1, distance_upper_bound=tol, **kwargs)
+
+    order = np.argsort(dists)
+    matched = np.zeros(n_true, dtype=bool)
+    tp = 0
+    for i in order:
+        dist = dists[i]
+        idx = idxs[i]
+        if not np.isfinite(dist) or dist > tol or idx >= n_true:
+            break
+        if not matched[idx]:
+            matched[idx] = True
+            tp += 1
+    return tp
+
+
 def compute_metrics(
     xs: np.ndarray,
     true_points: np.ndarray,
@@ -165,8 +218,7 @@ def compute_metrics(
     nearest-neighbor distances
 
     .. math::
-        d^{(p)}_i = \min_j \|p_i - t_j\|_2,\qquad
-        d^{(t)}_j = \min_i \|t_j - p_i\|_2.
+        d^{(p)}_i = \min_j \|p_i - t_j\|_2.
 
     The following metrics are returned (subset controllable by ``names``):
 
@@ -175,17 +227,16 @@ def compute_metrics(
       (``inf`` if ``N_p=0``).
     - **rmse**:
       :math:`\sqrt{\operatorname{MSE}}`.
-    - **recall** (%) at tolerance ``tol``:
-      :math:`100\cdot \frac{\#\{j:\ d^{(t)}_j\le \text{tol}\}}{N_t}`.
-    - **precision** (%) at tolerance ``tol``:
-      :math:`100\cdot \frac{\#\{i:\ d^{(p)}_i\le \text{tol}\}}{N_p}`.
+    - **recall** (%): fraction of ground-truth points matched within
+      ``tol`` to some prediction.
+    - **precision** (%): fraction of predictions matched within ``tol`` to
+      a ground-truth point.
     - **f1** (%) harmonic mean of precision and recall:
       :math:`\frac{2PR}{P+R}` (with :math:`P,R` in percent).
-    - **tp**, **fp**, **fn**:
-      counts at threshold ``tol`` (``tp`` is the **min** of truth-side and
-      pred-side positives to be conservative).
-    - **n_pred**, **n_true**, **tol**:
-      basic counts and the tolerance repeated for convenience.
+    - **tp**, **fp**, **fn**: counts at threshold ``tol`` obtained from a
+      one-to-one greedy matching between predictions and truth points.
+    - **n_pred**, **n_true**, **tol**: basic counts and the tolerance
+      repeated for convenience.
 
     Parameters
     ----------
@@ -220,32 +271,34 @@ def compute_metrics(
     T = _as_xyz(true_points)
 
     # Decide which distances we actually need to compute
-    default_keys = ("mse", "rmse", "recall", "precision", "f1", "tp", "fp", "fn", "n_pred", "n_true", "tol")
+    default_keys = (
+        "mse",
+        "rmse",
+        "recall",
+        "precision",
+        "f1",
+        "tp",
+        "fp",
+        "fn",
+        "n_pred",
+        "n_true",
+        "tol",
+    )
     wanted = set(default_keys) if names is None else set(names)
 
-    need_pred_d = any(k in wanted for k in ("mse", "rmse", "precision", "tp", "fp", "n_pred"))
-    need_true_d = any(k in wanted for k in ("recall", "f1", "fn", "n_true"))
+    need_pred_d = any(k in wanted for k in ("mse", "rmse"))
 
     d_pred = None
-    d_true = None
-    pred_tree = None
-    true_tree = None
-
-    # Compute pred->truth once (and get truth KD-tree), if needed
-    if need_pred_d:
-        d_pred, true_tree = _nn_dists(P, T, return_tree=True, n_jobs=n_jobs)
-
-    # Compute truth->pred once (reuse pred KD-tree if we already built it), if needed
-    if need_true_d:
-        d_true, pred_tree = _nn_dists(T, P, return_tree=True, n_jobs=n_jobs)
 
     out: Dict[str, float] = {}
 
     # Counts
+    n_pred = len(P)
+    n_true = len(T)
     if "n_pred" in wanted:
-        out["n_pred"] = float(len(P))
+        out["n_pred"] = float(n_pred)
     if "n_true" in wanted:
-        out["n_true"] = float(len(T))
+        out["n_true"] = float(n_true)
     if "tol" in wanted:
         out["tol"] = float(tol)
 
@@ -264,23 +317,14 @@ def compute_metrics(
 
     # Efficiency metrics (percentages + TP/FP/FN)
     if any(k in wanted for k in ("recall", "precision", "f1", "tp", "fp", "fn")):
-        # Truth-side (recall)
-        if d_true is None:
-            d_true = _nn_dists(T, P, n_jobs=n_jobs)
-        tp_truth = int(np.sum(d_true <= tol))
-        fn = int(len(d_true) - tp_truth)
-        recall = (100.0 * tp_truth / len(d_true)) if len(d_true) else 0.0
+        tp = _greedy_tp(P, T, tol, n_jobs=n_jobs)
+        fp = n_pred - tp
+        fn = n_true - tp
+        recall = (100.0 * tp / n_true) if n_true else 0.0
+        precision = (100.0 * tp / n_pred) if n_pred else 0.0
 
-        # Pred-side (precision)
-        if d_pred is None:
-            d_pred = _nn_dists(P, T, n_jobs=n_jobs)
-        tp_pred = int(np.sum(d_pred <= tol))
-        fp = int(len(d_pred) - tp_pred)
-        precision = (100.0 * tp_pred / len(d_pred)) if len(d_pred) else 0.0
-
-        # Conservative TP count (min of the two sides)
         if "tp" in wanted:
-            out["tp"] = float(min(tp_truth, tp_pred))
+            out["tp"] = float(tp)
         if "fp" in wanted:
             out["fp"] = float(fp)
         if "fn" in wanted:

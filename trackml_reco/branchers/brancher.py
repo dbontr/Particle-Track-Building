@@ -639,9 +639,11 @@ class Brancher(abc.ABC):
     
     def _gate_radius_trace(self, S: np.ndarray, depth_frac: float = 0.0, base_mul: float = None, tighten: float = None):
         r"""
-        Trace-based scalar gate with progressive tightening.
+        Scalar gate based on covariance size with progressive tightening.
 
-        The gate radius is
+        The gate radius is computed from the largest eigenvalue of the
+        innovation covariance, providing a more conservative estimate when the
+        uncertainty is anisotropic. This yields a radius
 
         .. math::
 
@@ -652,7 +654,7 @@ class Brancher(abc.ABC):
 
         .. math::
 
-            \text{base} \;=\; \text{base\_mul}\,\sqrt{\max(10^{-12}, \tfrac{1}{3}\operatorname{tr}(\mathbf{S}))}.
+            \text{base} \;=\; \text{base\_mul}\,\sqrt{\lambda_{\max}(\mathbf{S})}.
 
         Parameters
         ----------
@@ -674,7 +676,9 @@ class Brancher(abc.ABC):
             base_mul = self.gate_multiplier
         if tighten is None:
             tighten = self.gate_tighten
-        base = float(base_mul * np.sqrt(max(1e-12, np.trace(S) / 3.0)))
+        # Use the maximum eigenvalue to capture anisotropic uncertainty
+        lam_max = float(np.max(np.linalg.eigvalsh(S)))
+        base = float(base_mul * np.sqrt(max(1e-12, lam_max)))
         return base * max(0.5, 1.0 - float(tighten) * float(depth_frac))
 
     def _get_candidates_in_gate(self, pred_pos: np.ndarray, layer: Tuple[int,int], radius: float):
